@@ -12,13 +12,3 @@ __pycache__/
 node_modules/
 .next/
 out/
-
-
-.venv/
-.specify/
-.claude/
-
-uv.lock 
-.python-version
-pyproject.toml
-
