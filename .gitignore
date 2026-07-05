@@ -1,0 +1,12 @@
+.claude/
+.specify/   
+Slack-agent/
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.env
+.env.*
+!.env.example
