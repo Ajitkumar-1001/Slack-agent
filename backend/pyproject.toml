@@ -5,7 +5,9 @@ description = "Add your description here"
 readme = "../README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "aiohttp>=3.14.1",
     "alembic>=1.18.4",
+    "anthropic>=0.116.0",
     "asyncpg>=0.31.0",
     "fastapi>=0.138.0",
     "httpx>=0.28.1",
@@ -17,7 +19,7 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "slack-bolt>=1.28.0",
     "slack-sdk>=3.42.0",
-    "sqlalchemy>=2.0.51",
+    "sqlalchemy[asyncio]>=2.0.51",
     "structlog>=26.1.0",
     "tenacity>=9.1.4",
     "uvicorn[standard]>=0.49.0",
@@ -25,6 +27,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "aiosqlite>=0.22.1",
     "mypy>=2.1.0",
     "pre-commit>=4.6.0",
     "pyright>=1.1.410",
@@ -32,3 +35,7 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.19",
 ]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true

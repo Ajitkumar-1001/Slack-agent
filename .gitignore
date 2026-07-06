@@ -17,3 +17,5 @@ Slack-agent/
 
 .claude/
 .specify/ 
+.cursor/
+graphify-out/
