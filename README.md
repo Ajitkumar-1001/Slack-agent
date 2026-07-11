@@ -1,4 +1,4 @@
-# FlowPilot AI
+# FlowPilot AI- Slack integration
 
 ### Slack-Native Project Execution Copilot
 
