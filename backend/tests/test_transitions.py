@@ -77,7 +77,7 @@ async def test_jira_only_target_creates_zero_github_issues(db_session, valid_pla
     async def jira_create(_payload):
         return ("PROJ-1", "https://example.atlassian.net/browse/PROJ-1")
 
-    outcomes = await execute_plan(
+    outcomes, _notion_outcome = await execute_plan(
         session=db_session, proposal=proposal, target_systems=["jira"],
         create_remote=github_create, search_remote=_no_op_remote,
         jira_create_remote=jira_create, jira_search_remote=_no_op_remote,
@@ -122,7 +122,7 @@ async def test_both_target_produces_ten_action_log_rows_for_five_tasks(db_sessio
         n = next(jira_ids)
         return (f"PROJ-{n}", f"https://example.atlassian.net/browse/PROJ-{n}")
 
-    outcomes = await execute_plan(
+    outcomes, _notion_outcome = await execute_plan(
         session=db_session, proposal=proposal, target_systems=["both"],
         create_remote=github_create, search_remote=_no_op_remote,
         jira_create_remote=jira_create, jira_search_remote=_no_op_remote,
@@ -153,7 +153,7 @@ async def test_both_target_isolates_per_system_failure(db_session, valid_plan_di
     async def jira_create_fails(_payload):
         raise RuntimeError("Jira 500")
 
-    outcomes = await execute_plan(
+    outcomes, _notion_outcome = await execute_plan(
         session=db_session, proposal=proposal, target_systems=["both"],
         create_remote=github_create, search_remote=_no_op_remote,
         jira_create_remote=jira_create_fails, jira_search_remote=_no_op_remote,
@@ -163,6 +163,117 @@ async def test_both_target_isolates_per_system_failure(db_session, valid_plan_di
     by_system = {system: outcome for _task, system, outcome in outcomes}
     assert by_system["github"].status == ActionLogStatus.SUCCEEDED
     assert by_system["jira"].status == ActionLogStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_notion_enabled_execution_adds_one_action_log_and_artifact_and_returns_notion_outcome(
+    db_session, valid_plan_dict
+):
+    """T006 [US1] — Notion execution-wiring test (contracts/tool-adapters.md).
+
+    RED until T012 extends execute_plan with notion_enabled and a proposal-scoped Notion call
+    made once after the existing per-task GitHub/Jira loop.
+    """
+    from db.models import ActionLog, ExternalArtifact, ProposalStatus
+    from sqlalchemy import select
+    from workflows.execute_plan import execute_plan
+
+    proposal = await _make_proposal(db_session, ProposalStatus.APPROVED, valid_plan_dict)
+
+    async def notion_create(_payload):
+        return ("notion-page-1", "https://notion.so/notion-page-1")
+
+    async def notion_search(_key):
+        return None
+
+    outcomes, notion_outcome = await execute_plan(
+        session=db_session, proposal=proposal, create_remote=_ok_create, search_remote=_no_op_remote,
+        notion_enabled=True, notion_create_remote=notion_create, notion_search_remote=notion_search,
+    )
+
+    assert len(outcomes) == 1  # per-task GitHub outcome list is unchanged in shape
+    assert notion_outcome is not None
+    assert notion_outcome.status.value == "succeeded"
+    assert notion_outcome.external_url == "https://notion.so/notion-page-1"
+
+    rows = (await db_session.execute(select(ActionLog))).scalars().all()
+    notion_rows = [r for r in rows if r.target_system == "notion"]
+    assert len(notion_rows) == 1
+
+    artifacts = (await db_session.execute(select(ExternalArtifact))).scalars().all()
+    notion_artifacts = [a for a in artifacts if a.system == "notion"]
+    assert len(notion_artifacts) == 1
+
+
+@pytest.mark.asyncio
+async def test_notion_remote_reconciliation_through_execute_plan(db_session, valid_plan_dict):
+    """T016 [US2] — remote-reconciliation-through-execution test (contracts/tool-adapters.md).
+
+    Complements T004's adapter-level coverage by driving the same reconciliation case through
+    execute_plan's actual wiring: no local ActionLog record exists for the Notion key, but the
+    injected notion_search_remote reports an already-tagged page -- execute_plan's Notion call
+    must reconcile (SKIPPED_DUPLICATE) instead of creating a duplicate page.
+    """
+    from db.models import ActionLog, ActionLogStatus, ProposalStatus
+    from sqlalchemy import select
+    from workflows.execute_plan import execute_plan
+
+    proposal = await _make_proposal(db_session, ProposalStatus.APPROVED, valid_plan_dict)
+
+    async def notion_search(_key):  # local record missing, but the page already exists in Notion
+        return ("page-9", "https://notion.so/page-9")
+
+    async def notion_create(_payload):
+        raise AssertionError("must reconcile the existing remote page, not create a duplicate")
+
+    outcomes, notion_outcome = await execute_plan(
+        session=db_session, proposal=proposal, create_remote=_ok_create, search_remote=_no_op_remote,
+        notion_enabled=True, notion_create_remote=notion_create, notion_search_remote=notion_search,
+    )
+
+    assert len(outcomes) == 1
+    assert notion_outcome is not None
+    assert notion_outcome.status == ActionLogStatus.SKIPPED_DUPLICATE
+    assert notion_outcome.external_id == "page-9"
+
+    rows = (await db_session.execute(select(ActionLog))).scalars().all()
+    notion_rows = [r for r in rows if r.target_system == "notion"]
+    assert len(notion_rows) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_systems", [None, ["github"], ["jira"], ["both"]])
+async def test_notion_disabled_execution_never_calls_notion_adapter(
+    db_session, valid_plan_dict, target_systems
+):
+    """T019 [US3] — toggle-off zero-write test (contracts/tool-adapters.md).
+
+    With notion_enabled left at its default (False), execute_plan must never call the Notion
+    adapter -- regardless of target_systems -- and must return notion_outcome=None. The injected
+    notion_create_remote/notion_search_remote raise if called at all, proving they're unreached.
+    """
+    from db.models import ProposalStatus
+    from workflows.execute_plan import execute_plan
+
+    proposal = await _make_proposal(db_session, ProposalStatus.APPROVED, valid_plan_dict)
+
+    async def notion_create(_payload):
+        raise AssertionError("must not call the Notion adapter when notion_enabled is False")
+
+    async def notion_search(_key):
+        raise AssertionError("must not call the Notion adapter when notion_enabled is False")
+
+    async def jira_create(_payload):
+        return ("PROJ-1", "https://example.atlassian.net/browse/PROJ-1")
+
+    _outcomes, notion_outcome = await execute_plan(
+        session=db_session, proposal=proposal, target_systems=target_systems,
+        create_remote=_ok_create, search_remote=_no_op_remote,
+        jira_create_remote=jira_create, jira_search_remote=_no_op_remote,
+        notion_create_remote=notion_create, notion_search_remote=notion_search,
+    )
+
+    assert notion_outcome is None
 
 
 @pytest.mark.asyncio
@@ -227,6 +338,33 @@ async def test_reject_records_decision_and_creates_no_artifacts(db_session, vali
 
     action_rows = (await db_session.execute(select(ActionLog))).scalars().all()
     assert action_rows == []  # SC-003: zero external artifacts on the reject path
+
+
+@pytest.mark.asyncio
+async def test_reject_creates_no_notion_artifacts_even_if_toggle_was_enabled(db_session, valid_plan_dict):
+    """T020 [US3] — rejected-plan zero-Notion-writes test (AC-205; contracts/tool-adapters.md).
+
+    The Notion toggle is a transient value carried only in the Approve button's own value
+    (data-model.md) -- it never reaches reject_plan, and reject_plan never calls execute_plan, so
+    a proposal rejected while its card's toggle was checked produces zero Notion ActionLog/
+    ExternalArtifact rows, exactly like the existing GitHub/Jira zero-artifact reject guarantee.
+    """
+    from db.models import ActionLog, ExternalArtifact, ProposalStatus
+    from sqlalchemy import select
+    from workflows.approve_plan import reject_plan
+
+    proposal = await _make_proposal(db_session, ProposalStatus.PENDING_APPROVAL, valid_plan_dict)
+
+    await reject_plan(session=db_session, proposal_id=str(proposal.id), user_id="U2")
+
+    refreshed = await db_session.get(type(proposal), proposal.id)
+    assert refreshed.status == ProposalStatus.REJECTED
+
+    action_rows = (await db_session.execute(select(ActionLog))).scalars().all()
+    assert [r for r in action_rows if r.target_system == "notion"] == []
+
+    artifact_rows = (await db_session.execute(select(ExternalArtifact))).scalars().all()
+    assert [a for a in artifact_rows if a.system == "notion"] == []
 
 
 @pytest.mark.asyncio

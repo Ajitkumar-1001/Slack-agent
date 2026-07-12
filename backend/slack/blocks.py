@@ -4,6 +4,8 @@ from collections.abc import Mapping, Sequence
 
 from agents.schemas import ProjectPlan
 from app.config import settings
+from db.models import ActionLogStatus
+from tools.github import IssueOutcome
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
@@ -14,23 +16,38 @@ _TARGET_SYSTEM_OPTIONS = [
 ]
 
 
+_NOTION_CHECKBOX_OPTION = {
+    "text": {"type": "plain_text", "text": "Generate Notion project brief"},
+    "value": "notion_brief",
+}
+
+
 def render_approval_card(
     *,
     proposal_id: str,
     plan: ProjectPlan,
     action_summary: str,
     target_system: str = settings.default_target_system,
+    notion_enabled: bool = settings.default_notion_enabled,
 ) -> list[dict]:
     """Summarize (not dump) the plan as a Block Kit approval message with a target-system
     selector (FR-101) and Approve / Edit / Reject buttons. Approve's value carries the
-    currently-selected target system (research.md Decision 1); Edit/Reject just carry
-    proposal_id, since neither creates an external artifact."""
+    currently-selected target system and Notion-brief toggle (research.md Decision 1);
+    Edit/Reject just carry proposal_id, since neither creates an external artifact.
+
+    The Notion checkbox (FR-201) is omitted entirely when settings.notion_api_key is unset —
+    not shown-and-disabled — so an unconfigured deployment's card looks exactly like v1/MVP2's."""
     top_risks = sorted(plan.risks, key=lambda r: _SEVERITY_ORDER[r.severity])[:3]
     risk_lines = "\n".join(
         f"• *{r.title}* ({r.severity}) — {r.mitigation}" for r in top_risks
     )
+    # T022 audit: force notion_enabled off whenever notion_api_key is unset, so a misconfigured
+    # deployment (e.g. DEFAULT_NOTION_ENABLED=true with no NOTION_API_KEY) can never bake "true"
+    # into the Approve value just because the checkbox itself is correctly hidden (AC-203).
+    notion_enabled = notion_enabled and bool(settings.notion_api_key)
+    notion_flag = "true" if notion_enabled else "false"
 
-    return [
+    blocks: list[dict] = [
         {"type": "header", "text": {"type": "plain_text", "text": plan.project_name}},
         {
             "type": "section",
@@ -75,6 +92,19 @@ def render_approval_card(
                 },
             ],
         },
+    ]
+
+    if settings.notion_api_key:
+        checkbox: dict = {
+            "type": "checkboxes",
+            "action_id": "select_notion_brief",
+            "options": [_NOTION_CHECKBOX_OPTION],
+        }
+        if notion_enabled:
+            checkbox["initial_options"] = [_NOTION_CHECKBOX_OPTION]
+        blocks.append({"type": "actions", "block_id": "notion_brief_select", "elements": [checkbox]})
+
+    blocks.append(
         {
             "type": "actions",
             "elements": [
@@ -83,7 +113,7 @@ def render_approval_card(
                     "action_id": "approve_plan",
                     "text": {"type": "plain_text", "text": "Approve"},
                     "style": "primary",
-                    "value": f"{proposal_id}|{target_system}",
+                    "value": f"{proposal_id}|{target_system}|{notion_flag}",
                 },
                 {
                     "type": "button",
@@ -99,8 +129,9 @@ def render_approval_card(
                     "value": proposal_id,
                 },
             ],
-        },
-    ]
+        }
+    )
+    return blocks
 
 
 def render_already_decided_notice(*, status: str) -> str:
@@ -123,6 +154,7 @@ def render_stakeholder_summary(
     failed_by_system: Mapping[str, Sequence[str]],
     open_risks: Sequence[str],
     next_steps: str,
+    notion_outcome: IssueOutcome | None = None,
 ) -> list[dict]:
     """Post-execution summary (FR-016/FR-017/FR-105): one Created section per system with any
     artifacts, a per-system succeeded/failed breakdown when any system has failures, open risks,
@@ -158,6 +190,13 @@ def render_stakeholder_summary(
                 failed_lines = "\n".join(f"• {title}" for title in failed)
                 text += f", {len(failed)} failed\n{failed_lines}"
             blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": text}})
+
+    if notion_outcome is not None:
+        if notion_outcome.status in (ActionLogStatus.SUCCEEDED, ActionLogStatus.SKIPPED_DUPLICATE):
+            text = f"*Notion:* 1 project brief (<{notion_outcome.external_url}|link>)"
+        else:  # FAILED — always explicit, never silently omitted (spec.md Clarifications 2026-07-12)
+            text = "*Notion:* brief failed (see audit log)"
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": text}})
 
     if open_risks:
         risk_lines = "\n".join(f"• {risk}" for risk in open_risks)

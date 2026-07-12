@@ -26,6 +26,7 @@ from tools.github import (
     github_find_issue,
 )
 from tools.jira import build_ticket_payload, create_ticket_idempotent, jira_create_ticket, jira_find_ticket
+from tools.notion import build_brief_payload, create_brief_idempotent, notion_create_page, notion_find_page
 
 log = structlog.get_logger()
 
@@ -59,6 +60,63 @@ def _resolve_target_systems(target_systems: list[str] | None) -> list[str]:
     return resolved
 
 
+async def _persist_action(
+    *,
+    session: AsyncSession,
+    action_repo: ActionLogRepository,
+    artifact_repo: ExternalArtifactRepository,
+    proposal: ProjectProposal,
+    action_type: str,
+    target_system: str,
+    key: str,
+    payload: dict,
+    outcome: IssueOutcome,
+    artifact_type: str,
+    title: str,
+) -> None:
+    """Upsert-by-idempotency-key ActionLog + (on success) ExternalArtifact — shared by the
+    per-task GitHub/Jira loop and the proposal-scoped Notion brief call."""
+    response_json = {"external_id": outcome.external_id, "external_url": outcome.external_url}
+    existing_log = await action_repo.get_by_idempotency_key(key)
+    if existing_log is None:
+        action_log = ActionLog(
+            proposal_id=proposal.id,
+            action_type=action_type,
+            target_system=target_system,
+            idempotency_key=key,
+            request_payload_json=payload,
+            response_payload_json=response_json,
+            status=outcome.status,
+            error_message=outcome.error,
+        )
+        await action_repo.add(action_log)
+    else:  # retry / re-run: update the existing record, never insert a second row for this key
+        existing_log.status = outcome.status
+        existing_log.response_payload_json = response_json
+        existing_log.error_message = outcome.error
+        action_log = existing_log
+        await session.flush()
+
+    if outcome.external_id is not None:
+        has_artifact = (
+            await session.execute(
+                select(ExternalArtifact).where(ExternalArtifact.action_log_id == action_log.id)
+            )
+        ).scalar_one_or_none()
+        if has_artifact is None:
+            await artifact_repo.add(
+                ExternalArtifact(
+                    proposal_id=proposal.id,
+                    action_log_id=action_log.id,
+                    system=target_system,
+                    artifact_type=artifact_type,
+                    external_id=outcome.external_id,
+                    external_url=outcome.external_url,
+                    title=title,
+                )
+            )
+
+
 async def execute_plan(
     *,
     session: AsyncSession,
@@ -68,7 +126,10 @@ async def execute_plan(
     search_remote: RemoteLookup = github_find_issue,
     jira_create_remote: RemoteCreate = jira_create_ticket,
     jira_search_remote: RemoteLookup = jira_find_ticket,
-) -> list[tuple[Task, str, IssueOutcome]]:
+    notion_enabled: bool = False,
+    notion_create_remote: RemoteCreate = notion_create_page,
+    notion_search_remote: RemoteLookup = notion_find_page,
+) -> tuple[list[tuple[Task, str, IssueOutcome]], IssueOutcome | None]:
     if proposal.status != ProposalStatus.APPROVED:
         raise ExecutionNotApprovedError(
             f"proposal {proposal.id} is not approved (status={proposal.status})"
@@ -118,46 +179,42 @@ async def execute_plan(
                 outcome = IssueOutcome(ActionLogStatus.FAILED, None, None, str(exc))
                 log.warning(f"{target_system}_write_failed", idempotency_key=key, error=str(exc))
 
-            response_json = {"external_id": outcome.external_id, "external_url": outcome.external_url}
-            existing_log = await action_repo.get_by_idempotency_key(key)
-            if existing_log is None:
-                action_log = ActionLog(
-                    proposal_id=proposal.id,
-                    action_type=adapter.action_type,
-                    target_system=target_system,
-                    idempotency_key=key,
-                    request_payload_json=payload,
-                    response_payload_json=response_json,
-                    status=outcome.status,
-                    error_message=outcome.error,
-                )
-                await action_repo.add(action_log)
-            else:  # retry / re-run: update the existing record, never insert a second row for this key
-                existing_log.status = outcome.status
-                existing_log.response_payload_json = response_json
-                existing_log.error_message = outcome.error
-                action_log = existing_log
-                await session.flush()
-
-            if outcome.external_id is not None:
-                has_artifact = (
-                    await session.execute(
-                        select(ExternalArtifact).where(ExternalArtifact.action_log_id == action_log.id)
-                    )
-                ).scalar_one_or_none()
-                if has_artifact is None:
-                    await artifact_repo.add(
-                        ExternalArtifact(
-                            proposal_id=proposal.id,
-                            action_log_id=action_log.id,
-                            system=target_system,
-                            artifact_type=adapter.artifact_type,
-                            external_id=outcome.external_id,
-                            external_url=outcome.external_url,
-                            title=task.title,
-                        )
-                    )
+            await _persist_action(
+                session=session, action_repo=action_repo, artifact_repo=artifact_repo, proposal=proposal,
+                action_type=adapter.action_type, target_system=target_system, key=key, payload=payload,
+                outcome=outcome, artifact_type=adapter.artifact_type, title=task.title,
+            )
             outcomes.append((task, target_system, outcome))
+
+    notion_outcome: IssueOutcome | None = None
+    if notion_enabled:
+        links = [
+            (system, task.title, outcome.external_url)
+            for task, system, outcome in outcomes
+            if outcome.status in (ActionLogStatus.SUCCEEDED, ActionLogStatus.SKIPPED_DUPLICATE)
+            and outcome.external_url is not None
+        ]
+        notion_key = f"{proposal.id}:notion:create_project_brief"
+        notion_payload = build_brief_payload(
+            proposal_id=str(proposal.id), plan=plan, links=links, idempotency_key=notion_key
+        )
+        try:
+            notion_outcome = await create_brief_idempotent(
+                idempotency_key=notion_key,
+                payload=notion_payload,
+                find_local=find_local,
+                search_remote=notion_search_remote,
+                create_remote=notion_create_remote,
+            )
+        except Exception as exc:  # a Notion failure must not affect any GitHub/Jira outcome above
+            notion_outcome = IssueOutcome(ActionLogStatus.FAILED, None, None, str(exc))
+            log.warning("notion_write_failed", idempotency_key=notion_key, error=str(exc))
+
+        await _persist_action(
+            session=session, action_repo=action_repo, artifact_repo=artifact_repo, proposal=proposal,
+            action_type="create_project_brief", target_system="notion", key=notion_key,
+            payload=notion_payload, outcome=notion_outcome, artifact_type="page", title=plan.project_name,
+        )
 
     all_failed = bool(outcomes) and all(o.status == ActionLogStatus.FAILED for _, _, o in outcomes)
     proposal.status = ProposalStatus.FAILED if all_failed else ProposalStatus.EXECUTED
@@ -169,5 +226,6 @@ async def execute_plan(
         succeeded=sum(o.status == ActionLogStatus.SUCCEEDED for _, _, o in outcomes),
         skipped=sum(o.status == ActionLogStatus.SKIPPED_DUPLICATE for _, _, o in outcomes),
         failed=sum(o.status == ActionLogStatus.FAILED for _, _, o in outcomes),
+        notion_attempted=notion_outcome is not None,
     )
-    return outcomes
+    return outcomes, notion_outcome

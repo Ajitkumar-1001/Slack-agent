@@ -45,7 +45,8 @@ async def handle_select_target_system(ack: Any, body: dict, action: dict, respon
     """FR-101: swaps the target-system choice on the approval card in place (`chat.update`) --
     no DB write, no ApprovalDecision (research.md Decision 1). The Approve button's value is
     the only place the choice is carried, so it's the only element besides the select itself
-    that needs rewriting."""
+    that needs rewriting. Preserves the Approve value's third (notion_flag) segment untouched
+    (research.md Decision 1, 003-flowpilot-notion-integration)."""
     await ack()
     target_system = action["selected_option"]["value"]
 
@@ -57,8 +58,32 @@ async def handle_select_target_system(ack: Any, body: dict, action: dict, respon
                     opt for opt in element["options"] if opt["value"] == target_system
                 )
             elif element.get("action_id") == "approve_plan":
-                proposal_id = element["value"].split("|", 1)[0]
-                element["value"] = f"{proposal_id}|{target_system}"
+                proposal_id, _old_target_system, notion_flag = element["value"].split("|", 2)
+                element["value"] = f"{proposal_id}|{target_system}|{notion_flag}"
+
+    await respond(blocks=blocks, replace_original=True)
+
+
+@bolt_app.action("select_notion_brief")
+async def handle_select_notion_brief(ack: Any, body: dict, action: dict, respond: Any) -> None:
+    """FR-201: toggles the Notion-brief checkbox on the approval card in place (`chat.update`) --
+    no DB write, no ApprovalDecision, mirroring select_target_system exactly (research.md
+    Decision 1). Approve's value is the only place the choice is carried."""
+    await ack()
+    notion_enabled = bool(action.get("selected_options"))
+    notion_flag = "true" if notion_enabled else "false"
+
+    blocks = body["message"]["blocks"]
+    for block in blocks:
+        for element in block.get("elements", []):
+            if element.get("action_id") == "select_notion_brief":
+                if notion_enabled:
+                    element["initial_options"] = element["options"]
+                else:
+                    element.pop("initial_options", None)
+            elif element.get("action_id") == "approve_plan":
+                proposal_id, target_system, _old_notion_flag = element["value"].split("|", 2)
+                element["value"] = f"{proposal_id}|{target_system}|{notion_flag}"
 
     await respond(blocks=blocks, replace_original=True)
 
@@ -66,7 +91,8 @@ async def handle_select_target_system(ack: Any, body: dict, action: dict, respon
 @bolt_app.action("approve_plan")
 async def handle_approve(ack: Any, body: dict, action: dict, respond: Any, say: Any) -> None:
     await ack()
-    proposal_id, target_system = action["value"].split("|", 1)
+    proposal_id, target_system, notion_flag = action["value"].split("|", 2)
+    notion_enabled = notion_flag == "true"
     user_id = body.get("user", {}).get("id", "")
 
     async with async_session_factory() as session:
@@ -76,8 +102,9 @@ async def handle_approve(ack: Any, body: dict, action: dict, respond: Any, say: 
         except DecisionLockedError as exc:
             await _notify_already_decided(respond, exc, "approve")
             return
-        outcomes = await execute_plan(
-            session=session, proposal=proposal, target_systems=[target_system]
+        outcomes, notion_outcome = await execute_plan(
+            session=session, proposal=proposal, target_systems=[target_system],
+            notion_enabled=notion_enabled,
         )
         plan = ProjectPlan(**proposal.plan_json)
 
@@ -104,6 +131,7 @@ async def handle_approve(ack: Any, body: dict, action: dict, respond: Any, say: 
         failed_by_system=failed_by_system,
         open_risks=open_risks,
         next_steps=next_steps,
+        notion_outcome=notion_outcome,
     )
     await say(blocks=summary)
 

@@ -243,7 +243,7 @@ async def test_partial_failure_persists_succeeded_and_failed_separately(db_sessi
             raise RuntimeError("GitHub 500")
         return ("1", "https://github.com/x/y/issues/1")
 
-    outcomes = await execute_plan(
+    outcomes, _notion_outcome = await execute_plan(
         session=db_session, proposal=proposal, create_remote=create_remote, search_remote=search_remote
     )
 
@@ -255,3 +255,133 @@ async def test_partial_failure_persists_succeeded_and_failed_separately(db_sessi
     rows = (await db_session.execute(select(ActionLog))).scalars().all()
     persisted = {r.status for r in rows}
     assert ActionLogStatus.SUCCEEDED in persisted and ActionLogStatus.FAILED in persisted
+
+
+@pytest.mark.asyncio
+async def test_new_brief_is_created():
+    """T004 [US1] — mirrors test_new_issue_is_created/test_new_ticket_is_created, for
+    tools/notion.py's create_brief_idempotent (contracts/tool-adapters.md).
+
+    RED until T009 creates backend/tools/notion.py.
+    """
+    from db.models import ActionLogStatus
+    from tools.notion import create_brief_idempotent
+
+    created = {"n": 0}
+
+    async def create_remote(_payload):
+        created["n"] += 1
+        return ("page-1", "https://notion.so/page-1")
+
+    outcome = await create_brief_idempotent(
+        idempotency_key="k1",
+        payload={"parent": {"page_id": "p"}, "properties": {}, "children": []},
+        find_local=_none, search_remote=_none, create_remote=create_remote,
+    )
+    assert outcome.status == ActionLogStatus.SUCCEEDED
+    assert outcome.external_url == "https://notion.so/page-1"
+    assert created["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_local_duplicate_brief_is_skipped_without_creating():
+    """T004 [US1] — a durable local record for the proposal-scoped key short-circuits
+    creation, mirroring the GitHub/Jira local-duplicate cases."""
+    from db.models import ActionLogStatus
+    from tools.notion import create_brief_idempotent
+
+    async def find_local(_key):
+        return ("page-1", "https://notion.so/page-1")
+
+    async def create_remote(_payload):
+        raise AssertionError("must not create a duplicate when a local record exists")
+
+    outcome = await create_brief_idempotent(
+        idempotency_key="k1",
+        payload={"parent": {"page_id": "p"}, "properties": {}, "children": []},
+        find_local=find_local, search_remote=_none, create_remote=create_remote,
+    )
+    assert outcome.status == ActionLogStatus.SKIPPED_DUPLICATE
+    assert outcome.external_id == "page-1"
+
+
+@pytest.mark.asyncio
+async def test_crash_before_persist_reconciles_brief_via_title_search():
+    """T004 [US1] — no local record, but a title-search finds an already-tagged Notion
+    page (research.md Decision 2) -> reconcile instead of creating a duplicate."""
+    from db.models import ActionLogStatus
+    from tools.notion import create_brief_idempotent
+
+    async def search_remote(_key):  # local record missing, but the page already exists in Notion
+        return ("page-9", "https://notion.so/page-9")
+
+    async def create_remote(_payload):
+        raise AssertionError("must reconcile the existing remote page, not create a duplicate")
+
+    outcome = await create_brief_idempotent(
+        idempotency_key="k1",
+        payload={"parent": {"page_id": "p"}, "properties": {}, "children": []},
+        find_local=_none, search_remote=search_remote, create_remote=create_remote,
+    )
+    assert outcome.status == ActionLogStatus.SKIPPED_DUPLICATE
+    assert outcome.external_id == "page-9"
+
+
+@pytest.mark.asyncio
+async def test_notion_retry_creates_no_duplicate_brief(db_session, valid_plan_dict):
+    """T015 [US2] — retry-safety test, driven through execute_plan (AC-202;
+    contracts/tool-adapters.md).
+
+    Re-invoking execute_plan for the same already-approved, Notion-enabled proposal (simulating a
+    retried/re-delivered approval outcome) must create exactly one Notion ActionLog/ExternalArtifact
+    pair -- the second run's local-record lookup short-circuits the Notion write, and its
+    notion_outcome is SKIPPED_DUPLICATE.
+    """
+    from db.models import ActionLog, ActionLogStatus, ExternalArtifact, ProjectProposal, ProposalStatus
+    from sqlalchemy import select
+    from workflows.execute_plan import execute_plan
+
+    proposal = ProjectProposal(
+        slack_channel_id="C1", slack_thread_ts="1.2", requested_by_user_id="U1",
+        project_name="P", objective="O", timeline=None, status=ProposalStatus.APPROVED,
+        plan_json=dict(valid_plan_dict), risk_json={},
+    )
+    db_session.add(proposal)
+    await db_session.commit()
+
+    notion_calls = {"n": 0}
+
+    async def notion_create(_payload):
+        notion_calls["n"] += 1
+        return ("page-1", "https://notion.so/page-1")
+
+    async def github_create(_payload):
+        return ("1", "https://github.com/x/y/issues/1")
+
+    _outcomes1, notion_outcome1 = await execute_plan(
+        session=db_session, proposal=proposal, create_remote=github_create, search_remote=_none,
+        notion_enabled=True, notion_create_remote=notion_create, notion_search_remote=_none,
+    )
+    assert notion_outcome1 is not None
+    assert notion_outcome1.status == ActionLogStatus.SUCCEEDED
+
+    # simulate a retried / re-delivered approval outcome for the same proposal
+    proposal.status = ProposalStatus.APPROVED
+    await db_session.commit()
+
+    _outcomes2, notion_outcome2 = await execute_plan(
+        session=db_session, proposal=proposal, create_remote=github_create, search_remote=_none,
+        notion_enabled=True, notion_create_remote=notion_create, notion_search_remote=_none,
+    )
+
+    assert notion_calls["n"] == 1  # no second create call on retry
+    assert notion_outcome2 is not None
+    assert notion_outcome2.status == ActionLogStatus.SKIPPED_DUPLICATE
+
+    rows = (await db_session.execute(select(ActionLog))).scalars().all()
+    notion_rows = [r for r in rows if r.target_system == "notion"]
+    assert len(notion_rows) == 1
+
+    artifacts = (await db_session.execute(select(ExternalArtifact))).scalars().all()
+    notion_artifacts = [a for a in artifacts if a.system == "notion"]
+    assert len(notion_artifacts) == 1

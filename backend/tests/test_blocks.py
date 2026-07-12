@@ -44,6 +44,9 @@ def test_approval_card_includes_target_system_selector_and_encodes_approve_value
 
     RED until T010 extends render_approval_card with the GitHub/Jira/Both static_select and
     changes the Approve button's value to "{proposal_id}|{target_system}" (Edit/Reject unchanged).
+
+    Updated for 003-flowpilot-notion-integration T010: the Approve value grows a third
+    {notion_flag} segment (contracts/block-kit.md), always present regardless of Notion config.
     """
     from agents.schemas import ProjectPlan
     from slack.blocks import render_approval_card
@@ -61,7 +64,7 @@ def test_approval_card_includes_target_system_selector_and_encodes_approve_value
     assert select["initial_option"]["value"] == "jira"
 
     approve = next(el for el in elements if el.get("action_id") == "approve_plan")
-    assert approve["value"] == "prop-123|jira"
+    assert approve["value"] == "prop-123|jira|false"
 
     # Edit Plan / Reject are unaffected by the target-system choice — they create zero artifacts
     edit = next(el for el in elements if el.get("action_id") == "edit_plan")
@@ -72,7 +75,10 @@ def test_approval_card_includes_target_system_selector_and_encodes_approve_value
 
 def test_approval_card_defaults_target_system_selector_to_github(valid_plan_dict):
     """T007 [US1] — AC-105: no target_system passed -> defaults to settings.default_target_system
-    ("github" out of the box), so a no-Jira deployment's card looks the same as v1's."""
+    ("github" out of the box), so a no-Jira deployment's card looks the same as v1's.
+
+    Updated for 003-flowpilot-notion-integration T010: the Approve value grows a third
+    {notion_flag} segment, defaulting to "false" (settings.default_notion_enabled)."""
     from agents.schemas import ProjectPlan
     from slack.blocks import render_approval_card
 
@@ -84,7 +90,114 @@ def test_approval_card_defaults_target_system_selector_to_github(valid_plan_dict
     assert select["initial_option"]["value"] == "github"
 
     approve = next(el for el in elements if el.get("action_id") == "approve_plan")
-    assert approve["value"] == "prop-1|github"
+    assert approve["value"] == "prop-1|github|false"
+
+
+def test_approval_card_includes_checked_notion_checkbox_and_encodes_flag_in_approve_value(
+    monkeypatch, valid_plan_dict
+):
+    """T005 [US1] — Notion brief toggle, checked case (FR-201; contracts/block-kit.md).
+
+    RED until T010 extends render_approval_card with the checkboxes element and the
+    Approve button's third value segment.
+    """
+    from agents.schemas import ProjectPlan
+    from app.config import settings
+    from slack.blocks import render_approval_card
+
+    monkeypatch.setattr(settings, "notion_api_key", "secret-token")
+
+    plan = ProjectPlan(**valid_plan_dict)
+    blocks = render_approval_card(
+        proposal_id="prop-123", plan=plan, action_summary="Create 1 GitHub issue", notion_enabled=True
+    )
+    elements = [el for b in blocks if b.get("type") == "actions" for el in b.get("elements", [])]
+
+    checkbox = next(el for el in elements if el.get("action_id") == "select_notion_brief")
+    assert checkbox["type"] == "checkboxes"
+    assert len(checkbox["options"]) == 1
+    assert [opt["value"] for opt in checkbox["initial_options"]] == [checkbox["options"][0]["value"]]
+
+    approve = next(el for el in elements if el.get("action_id") == "approve_plan")
+    assert approve["value"] == "prop-123|github|true"
+
+
+def test_approval_card_omits_initial_options_when_notion_checkbox_unchecked(monkeypatch, valid_plan_dict):
+    """T005 [US1] — Notion brief toggle, unchecked case: ``initial_options`` must be omitted
+    entirely (an empty list is invalid per the Slack API), and the Approve value's third
+    segment reflects the unchecked state."""
+    from agents.schemas import ProjectPlan
+    from app.config import settings
+    from slack.blocks import render_approval_card
+
+    monkeypatch.setattr(settings, "notion_api_key", "secret-token")
+
+    plan = ProjectPlan(**valid_plan_dict)
+    blocks = render_approval_card(
+        proposal_id="prop-123", plan=plan, action_summary="Create 1 GitHub issue", notion_enabled=False
+    )
+    elements = [el for b in blocks if b.get("type") == "actions" for el in b.get("elements", [])]
+
+    checkbox = next(el for el in elements if el.get("action_id") == "select_notion_brief")
+    assert "initial_options" not in checkbox
+
+    approve = next(el for el in elements if el.get("action_id") == "approve_plan")
+    assert approve["value"] == "prop-123|github|false"
+
+
+def test_approval_card_omits_notion_checkbox_entirely_when_unconfigured(monkeypatch, valid_plan_dict):
+    """T018 [US3] — toggle-hidden-when-unconfigured test (FR-201; contracts/block-kit.md).
+
+    When settings.notion_api_key is unset, the Notion checkboxes block must be omitted
+    entirely -- not shown-and-disabled -- so an unconfigured deployment's card looks exactly
+    like v1/MVP2's. The Approve button's value still always carries its third segment
+    (default "false"), so handle_approve never needs to branch on whether Notion was
+    configured at render time.
+    """
+    from agents.schemas import ProjectPlan
+    from app.config import settings
+    from slack.blocks import render_approval_card
+
+    monkeypatch.setattr(settings, "notion_api_key", None)
+
+    plan = ProjectPlan(**valid_plan_dict)
+    blocks = render_approval_card(proposal_id="prop-123", plan=plan, action_summary="Create 1 GitHub issue")
+    elements = [el for b in blocks if b.get("type") == "actions" for el in b.get("elements", [])]
+
+    assert not any(el.get("action_id") == "select_notion_brief" for el in elements)
+
+    approve = next(el for el in elements if el.get("action_id") == "approve_plan")
+    assert approve["value"] == "prop-123|github|false"
+
+
+def test_approval_card_never_encodes_notion_true_when_unconfigured_even_if_enabled_arg_is_true(
+    monkeypatch, valid_plan_dict
+):
+    """T022 [US3] — audit fix: a misconfigured deployment (DEFAULT_NOTION_ENABLED=true but no
+    NOTION_API_KEY, which resolves to notion_enabled=True at call time) must not leak that True
+    into the Approve value just because the checkbox itself is correctly hidden -- data-model.md's
+    invariant is that execution "never even considers notion_enabled as anything but its hidden
+    default (False)" when unconfigured, not just that the checkbox is hidden. Passing
+    notion_enabled=True directly exercises the exact value the (import-time-bound) default would
+    resolve to in that misconfiguration, without relying on monkeypatching a default that's
+    already bound at function-definition time.
+    """
+    from agents.schemas import ProjectPlan
+    from app.config import settings
+    from slack.blocks import render_approval_card
+
+    monkeypatch.setattr(settings, "notion_api_key", None)
+
+    plan = ProjectPlan(**valid_plan_dict)
+    blocks = render_approval_card(
+        proposal_id="prop-123", plan=plan, action_summary="Create 1 GitHub issue", notion_enabled=True
+    )
+    elements = [el for b in blocks if b.get("type") == "actions" for el in b.get("elements", [])]
+
+    assert not any(el.get("action_id") == "select_notion_brief" for el in elements)
+
+    approve = next(el for el in elements if el.get("action_id") == "approve_plan")
+    assert approve["value"] == "prop-123|github|false"
 
 
 def test_stakeholder_summary_includes_links_risks_and_partial_breakdown():
@@ -179,4 +292,76 @@ def test_stakeholder_summary_renders_per_system_partial_failure_breakdown():
     # independently visible, not collapsed into one aggregate pass/fail line for the run
     assert not any("fail" in t.lower() for t in github_lines)
     assert any("fail" in t.lower() for t in jira_lines)
+
+
+def test_stakeholder_summary_renders_notion_generated_line_for_succeeded_or_skipped_outcome():
+    """T007 [US1] — Notion generated-brief summary line (FR-206; contracts/block-kit.md).
+
+    RED until T013 adds notion_outcome to render_stakeholder_summary.
+    """
+    from db.models import ActionLogStatus
+    from slack.blocks import render_stakeholder_summary
+    from tools.github import IssueOutcome
+
+    for status in (ActionLogStatus.SUCCEEDED, ActionLogStatus.SKIPPED_DUPLICATE):
+        outcome = IssueOutcome(status, "page-1", "https://notion.so/page-1")
+        blocks = render_stakeholder_summary(
+            project_name="Onboarding Redesign",
+            created_by_system={"github": [("Build wireframes", "https://github.com/x/y/issues/1")]},
+            failed_by_system={"github": []},
+            open_risks=[],
+            next_steps="Track the created issues to completion.",
+            notion_outcome=outcome,
+        )
+        text = json.dumps(blocks)
+        assert "Notion" in text
+        assert "1 project brief" in text
+        assert "https://notion.so/page-1" in text
+
+
+def test_stakeholder_summary_renders_notion_failed_line_explicitly():
+    """T008 [US1] — Notion failed-brief summary line, never silently omitted (FR-206;
+    spec.md Clarifications session 2026-07-12, SC-207).
+
+    RED until T013 adds notion_outcome to render_stakeholder_summary.
+    """
+    from db.models import ActionLogStatus
+    from slack.blocks import render_stakeholder_summary
+    from tools.github import IssueOutcome
+
+    outcome = IssueOutcome(ActionLogStatus.FAILED, None, None, "Notion 500")
+    blocks = render_stakeholder_summary(
+        project_name="Onboarding Redesign",
+        created_by_system={"github": [("Build wireframes", "https://github.com/x/y/issues/1")]},
+        failed_by_system={"github": []},
+        open_risks=[],
+        next_steps="Track the created issues to completion.",
+        notion_outcome=outcome,
+    )
+    text = json.dumps(blocks)
+    assert "Notion" in text
+    assert "brief failed" in text
+    assert "audit log" in text
+
+
+def test_stakeholder_summary_renders_no_notion_line_when_outcome_is_none():
+    """T021 [US3] — not-attempted summary-line test (SC-203; contracts/block-kit.md).
+
+    notion_outcome defaults to None -- toggle off, unconfigured, or rejected -- and the summary
+    must render byte-for-byte identical to v1/MVP2 output, with no Notion section at all.
+    """
+    from slack.blocks import render_stakeholder_summary
+
+    kwargs = dict(
+        project_name="Onboarding Redesign",
+        created_by_system={"github": [("Build wireframes", "https://github.com/x/y/issues/1")]},
+        failed_by_system={"github": []},
+        open_risks=[],
+        next_steps="Track the created issues to completion.",
+    )
+    blocks_without_param = render_stakeholder_summary(**kwargs)
+    blocks_with_explicit_none = render_stakeholder_summary(**kwargs, notion_outcome=None)
+
+    assert blocks_without_param == blocks_with_explicit_none
+    assert "Notion" not in json.dumps(blocks_without_param)
 

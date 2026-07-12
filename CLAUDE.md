@@ -75,16 +75,18 @@ Approval state machine: `proposal_created -> pending_approval -> {approved | rej
 - Approved v1 dependencies only; introducing a new agent-orchestration framework (CrewAI, AutoGen, etc.) or a Slack vector DB requires a superseding ADR.
 
 <!-- SPECKIT START -->
-Active feature: **002-flowpilot-jira-integration**. Read the plan and its design
+Active feature: **003-flowpilot-notion-integration**. Read the plan and its design
 artifacts for technologies, project structure, contracts, and validation steps:
-- Plan: `.specify/specs/002-flowpilot-jira-integration/plan.md`
-- Spec: `.specify/specs/002-flowpilot-jira-integration/spec.md`
-- Data model: `.specify/specs/002-flowpilot-jira-integration/data-model.md`
-- Research: `.specify/specs/002-flowpilot-jira-integration/research.md`
-- Contracts: `.specify/specs/002-flowpilot-jira-integration/contracts/`
-- Quickstart (per-phase validation): `.specify/specs/002-flowpilot-jira-integration/quickstart.md`
+- Plan: `.specify/specs/003-flowpilot-notion-integration/plan.md`
+- Spec: `.specify/specs/003-flowpilot-notion-integration/spec.md`
+- Data model: `.specify/specs/003-flowpilot-notion-integration/data-model.md`
+- Research: `.specify/specs/003-flowpilot-notion-integration/research.md`
+- Contracts: `.specify/specs/003-flowpilot-notion-integration/contracts/`
+- Quickstart (per-phase validation): `.specify/specs/003-flowpilot-notion-integration/quickstart.md`
 
-Prior feature **001-flowpilot-slack-mvp** (GitHub-only v1) is complete — its own plan/spec/contracts
-remain at `.specify/specs/001-flowpilot-slack-mvp/` and are still the source of truth for anything
-this feature's contracts don't override (e.g. `http-api.md`, `agent-schemas.md`, `tools/slack_rts.py`).
+Prior features **001-flowpilot-slack-mvp** (GitHub-only v1) and **002-flowpilot-jira-integration**
+(Jira/Both routing) are complete — their own plan/spec/contracts remain at
+`.specify/specs/001-flowpilot-slack-mvp/` and `.specify/specs/002-flowpilot-jira-integration/` and
+are still the source of truth for anything this feature's contracts don't override (e.g.
+`http-api.md`, `agent-schemas.md`, `tools/slack_rts.py`, `tools/github.py`, `tools/jira.py`).
 <!-- SPECKIT END -->

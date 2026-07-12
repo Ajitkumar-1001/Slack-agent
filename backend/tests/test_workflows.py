@@ -88,7 +88,7 @@ async def test_both_target_creates_one_github_issue_and_one_jira_ticket_per_task
     async def jira_create(_payload):
         return ("PROJ-1", "https://example.atlassian.net/browse/PROJ-1")
 
-    outcomes = await execute_plan(
+    outcomes, _notion_outcome = await execute_plan(
         session=db_session, proposal=proposal, target_systems=["both"],
         create_remote=github_create, search_remote=no_op,
         jira_create_remote=jira_create, jira_search_remote=no_op,

@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     jira_api_token: str | None = None
     jira_project_key: str | None = None
     default_target_system: Literal["github", "jira", "both"] = "github"
+    # Notion fields are optional, same reason as jira_* above (AC-203) — see research.md Decision 6.
+    notion_api_key: str | None = None
+    notion_parent_page_id: str | None = None
+    default_notion_enabled: bool = False
     log_level: str = "INFO"
 
 
