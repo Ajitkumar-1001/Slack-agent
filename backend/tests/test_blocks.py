@@ -88,19 +88,16 @@ def test_approval_card_defaults_target_system_selector_to_github(valid_plan_dict
 
 
 def test_stakeholder_summary_includes_links_risks_and_partial_breakdown():
-    """T030 [US2] — stakeholder-summary payload (FR-016/FR-017). RED until T034 adds
-    render_stakeholder_summary to slack/blocks.py.
-
-    Interface imposed on T034: ``render_stakeholder_summary(*, project_name, created, failed,
-    open_risks, next_steps) -> list[dict]`` where ``created`` is ``list[(title, url)]`` and
-    ``failed`` is ``list[title]``.
+    """T030 [US2] — stakeholder-summary payload (FR-016/FR-017), updated for T023's
+    created_by_system/failed_by_system signature (FR-105; superseded the old flat
+    created/failed interface this test originally exercised).
     """
     from slack.blocks import render_stakeholder_summary
 
     blocks = render_stakeholder_summary(
         project_name="Onboarding Redesign",
-        created=[("Build wireframes", "https://github.com/x/y/issues/1")],
-        failed=["Set up CI"],
+        created_by_system={"github": [("Build wireframes", "https://github.com/x/y/issues/1")]},
+        failed_by_system={"github": ["Set up CI"]},
         open_risks=["No owner (high)"],
         next_steps="Retry the failed task after assigning an owner.",
     )
@@ -112,4 +109,74 @@ def test_stakeholder_summary_includes_links_risks_and_partial_breakdown():
     assert "Set up CI" in text  # failed task in the succeeded/failed breakdown
     assert "No owner" in text  # open risks
     assert "Retry the failed task" in text  # next steps
+
+
+def _section_texts(blocks):
+    return [b["text"]["text"] for b in blocks if b.get("type") == "section" and "text" in b]
+
+
+def test_stakeholder_summary_groups_created_by_system():
+    """T021 [US3] — per-system summary grouping (FR-105; contracts/block-kit.md).
+
+    RED until T023 changes render_stakeholder_summary's signature from one flat created/failed
+    list to created_by_system/failed_by_system dicts, rendering one section per system.
+    """
+    from slack.blocks import render_stakeholder_summary
+
+    blocks = render_stakeholder_summary(
+        project_name="Onboarding Redesign",
+        created_by_system={
+            "github": [("Build wireframes", "https://github.com/x/y/issues/1")],
+            "jira": [("Build wireframes", "https://example.atlassian.net/browse/PROJ-1")],
+        },
+        failed_by_system={"github": [], "jira": []},
+        open_risks=[],
+        next_steps="Track the created issues to completion.",
+    )
+    texts = _section_texts(blocks)
+
+    github_section = next(t for t in texts if "*GitHub:*" in t)
+    jira_section = next(t for t in texts if "*Jira:*" in t)
+    assert "https://github.com/x/y/issues/1" in github_section
+    assert "https://example.atlassian.net/browse/PROJ-1" in jira_section
+
+    # each system's created items must land in its own section, not a shared flat list
+    assert github_section != jira_section
+    assert "https://example.atlassian.net/browse/PROJ-1" not in github_section
+    assert "https://github.com/x/y/issues/1" not in jira_section
+
+
+def test_stakeholder_summary_renders_per_system_partial_failure_breakdown():
+    """T022 [US3] — partial-failure breakdown (AC-104; contracts/block-kit.md).
+
+    RED until T023. When Jira fails for a task but GitHub succeeds for all of its tasks, the
+    summary must show a per-system succeeded/failed breakdown -- not one aggregate pass/fail
+    result for the whole run.
+    """
+    from slack.blocks import render_stakeholder_summary
+
+    blocks = render_stakeholder_summary(
+        project_name="Onboarding Redesign",
+        created_by_system={
+            "github": [
+                ("Build wireframes", "https://github.com/x/y/issues/1"),
+                ("Write copy", "https://github.com/x/y/issues/2"),
+            ],
+            "jira": [("Build wireframes", "https://example.atlassian.net/browse/PROJ-1")],
+        },
+        failed_by_system={"github": [], "jira": ["Write copy"]},
+        open_risks=[],
+        next_steps="Retry the failed Jira task once resolved.",
+    )
+    texts = _section_texts(blocks)
+
+    github_lines = [t for t in texts if "*GitHub:*" in t]
+    jira_lines = [t for t in texts if "*Jira:*" in t]
+    assert github_lines and jira_lines
+    assert "Write copy" in "\n".join(texts)  # the failed task surfaces in jira's breakdown
+
+    # a genuine per-system breakdown: github (all succeeded) and jira (one failure) must be
+    # independently visible, not collapsed into one aggregate pass/fail line for the run
+    assert not any("fail" in t.lower() for t in github_lines)
+    assert any("fail" in t.lower() for t in jira_lines)
 

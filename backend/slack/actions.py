@@ -81,30 +81,27 @@ async def handle_approve(ack: Any, body: dict, action: dict, respond: Any, say: 
         )
         plan = ProjectPlan(**proposal.plan_json)
 
-    # T014: temporary flatten shim -- groups execute_plan's (Task, target_system, IssueOutcome)
-    # triples back into v1's flat created/failed lists so render_stakeholder_summary keeps working
-    # for a single-target run; replaced by per-system grouping in US3 (T024).
-    created = [
-        (task.title, outcome.external_url or "")
-        for task, _system, outcome in outcomes
-        if outcome.status in (ActionLogStatus.SUCCEEDED, ActionLogStatus.SKIPPED_DUPLICATE)
-    ]
-    failed = [
-        task.title
-        for task, _system, outcome in outcomes
-        if outcome.status == ActionLogStatus.FAILED
-    ]
+    # T024: group execute_plan's (Task, target_system, IssueOutcome) triples by system so
+    # render_stakeholder_summary can show each system's results separately (FR-105).
+    created_by_system: dict[str, list[tuple[str, str]]] = {}
+    failed_by_system: dict[str, list[str]] = {}
+    for task, system, outcome in outcomes:
+        if outcome.status in (ActionLogStatus.SUCCEEDED, ActionLogStatus.SKIPPED_DUPLICATE):
+            created_by_system.setdefault(system, []).append((task.title, outcome.external_url or ""))
+        elif outcome.status == ActionLogStatus.FAILED:
+            failed_by_system.setdefault(system, []).append(task.title)
+
     open_risks = [f"{risk.title} ({risk.severity})" for risk in plan.risks]
     next_steps = (
         "Retry the failed tasks once resolved; do not re-approve — already-created issues are kept."
-        if failed
+        if any(failed_by_system.values())
         else "Track the created issues to completion."
     )
 
     summary = render_stakeholder_summary(
         project_name=plan.project_name,
-        created=created,
-        failed=failed,
+        created_by_system=created_by_system,
+        failed_by_system=failed_by_system,
         open_risks=open_risks,
         next_steps=next_steps,
     )

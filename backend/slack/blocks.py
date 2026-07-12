@@ -1,6 +1,6 @@
 """Block Kit renderers (contracts/block-kit.md). Pure functions — no DB/business logic."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from agents.schemas import ProjectPlan
 from app.config import settings
@@ -112,26 +112,53 @@ def render_already_decided_notice(*, status: str) -> str:
     )
 
 
+_SYSTEM_ORDER = ("github", "jira")
+_SYSTEM_LABELS = {"github": ("GitHub", "issue"), "jira": ("Jira", "ticket")}
+
+
 def render_stakeholder_summary(
     *,
     project_name: str,
-    created: Sequence[tuple[str, str]],
-    failed: Sequence[str],
+    created_by_system: Mapping[str, Sequence[tuple[str, str]]],
+    failed_by_system: Mapping[str, Sequence[str]],
     open_risks: Sequence[str],
     next_steps: str,
 ) -> list[dict]:
-    """Post-execution summary (FR-016/FR-017): created issues with links, failed tasks, open
-    risks, and next steps. `created` is (title, url) pairs; `failed` is task titles."""
-    created_lines = "\n".join(f"• <{url}|{title}>" for title, url in created) or "_none_"
+    """Post-execution summary (FR-016/FR-017/FR-105): one Created section per system with any
+    artifacts, a per-system succeeded/failed breakdown when any system has failures, open risks,
+    and next steps. A single-target run degenerates to one system's section (v1-equivalent)."""
     blocks: list[dict] = [
         {"type": "header", "text": {"type": "plain_text", "text": f"{project_name} — execution summary"}},
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*Created issues:*\n{created_lines}"}},
     ]
-    if failed:
-        failed_lines = "\n".join(f"• {title}" for title in failed)
+    systems = [s for s in _SYSTEM_ORDER if created_by_system.get(s) or failed_by_system.get(s)]
+
+    for system in systems:
+        items = created_by_system.get(system) or []
+        if not items:
+            continue
+        label, noun = _SYSTEM_LABELS[system]
+        lines = "\n".join(f"• <{url}|{title}>" for title, url in items)
         blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"*Failed tasks:*\n{failed_lines}"}}
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*{label}:* {len(items)} {noun}{'s' if len(items) != 1 else ''}\n{lines}",
+                },
+            }
         )
+
+    if any(failed_by_system.values()):
+        for system in systems:
+            label, _noun = _SYSTEM_LABELS[system]
+            succeeded = len(created_by_system.get(system) or [])
+            failed = failed_by_system.get(system) or []
+            text = f"*{label}:* {succeeded} succeeded"
+            if failed:
+                failed_lines = "\n".join(f"• {title}" for title in failed)
+                text += f", {len(failed)} failed\n{failed_lines}"
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": text}})
+
     if open_risks:
         risk_lines = "\n".join(f"• {risk}" for risk in open_risks)
         blocks.append(
