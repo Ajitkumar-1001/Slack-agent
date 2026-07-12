@@ -30,9 +30,12 @@ class IssueOutcome:
     error: str | None = None
 
 
-def compute_idempotency_key(proposal_id: str, task: Task) -> str:
-    """Deterministic per (proposal, task) — the same approved task always maps to the same key."""
-    raw = f"{proposal_id}\x00{task.title}\x00{task.description}"
+def compute_idempotency_key(proposal_id: str, task: Task, target_system: str) -> str:
+    """Deterministic per (proposal, task, target_system) — the same approved task always maps to
+    the same key for a given target system, and never collides across systems (e.g. under "Both"
+    routing), since ActionLog.idempotency_key is a single-column unique constraint, not composite
+    with target_system. See research.md Decision 3 (002-flowpilot-jira-integration)."""
+    raw = f"{proposal_id}\x00{task.title}\x00{task.description}\x00{target_system}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 

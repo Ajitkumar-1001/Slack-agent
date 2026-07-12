@@ -40,10 +40,33 @@ async def _notify_already_decided(respond: Any, exc: DecisionLockedError, attemp
     )
 
 
+@bolt_app.action("select_target_system")
+async def handle_select_target_system(ack: Any, body: dict, action: dict, respond: Any) -> None:
+    """FR-101: swaps the target-system choice on the approval card in place (`chat.update`) --
+    no DB write, no ApprovalDecision (research.md Decision 1). The Approve button's value is
+    the only place the choice is carried, so it's the only element besides the select itself
+    that needs rewriting."""
+    await ack()
+    target_system = action["selected_option"]["value"]
+
+    blocks = body["message"]["blocks"]
+    for block in blocks:
+        for element in block.get("elements", []):
+            if element.get("action_id") == "select_target_system":
+                element["initial_option"] = next(
+                    opt for opt in element["options"] if opt["value"] == target_system
+                )
+            elif element.get("action_id") == "approve_plan":
+                proposal_id = element["value"].split("|", 1)[0]
+                element["value"] = f"{proposal_id}|{target_system}"
+
+    await respond(blocks=blocks, replace_original=True)
+
+
 @bolt_app.action("approve_plan")
 async def handle_approve(ack: Any, body: dict, action: dict, respond: Any, say: Any) -> None:
     await ack()
-    proposal_id = action["value"]
+    proposal_id, target_system = action["value"].split("|", 1)
     user_id = body.get("user", {}).get("id", "")
 
     async with async_session_factory() as session:
@@ -53,17 +76,22 @@ async def handle_approve(ack: Any, body: dict, action: dict, respond: Any, say: 
         except DecisionLockedError as exc:
             await _notify_already_decided(respond, exc, "approve")
             return
-        outcomes = await execute_plan(session=session, proposal=proposal)
+        outcomes = await execute_plan(
+            session=session, proposal=proposal, target_systems=[target_system]
+        )
         plan = ProjectPlan(**proposal.plan_json)
 
+    # T014: temporary flatten shim -- groups execute_plan's (Task, target_system, IssueOutcome)
+    # triples back into v1's flat created/failed lists so render_stakeholder_summary keeps working
+    # for a single-target run; replaced by per-system grouping in US3 (T024).
     created = [
         (task.title, outcome.external_url or "")
-        for task, outcome in zip(plan.tasks, outcomes)
+        for task, _system, outcome in outcomes
         if outcome.status in (ActionLogStatus.SUCCEEDED, ActionLogStatus.SKIPPED_DUPLICATE)
     ]
     failed = [
         task.title
-        for task, outcome in zip(plan.tasks, outcomes)
+        for task, _system, outcome in outcomes
         if outcome.status == ActionLogStatus.FAILED
     ]
     open_risks = [f"{risk.title} ({risk.severity})" for risk in plan.risks]

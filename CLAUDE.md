@@ -27,7 +27,9 @@ Precedence when guidance conflicts: (1) constitution, (2) PRD SourceOfTruth, (3)
 
 ## Current state
 
-The code is **scaffolding only**. `backend/main.py` is a hello-world stub; the package `__init__.py` files are empty. The module layout below is the *planned* target from the architecture plan — most files don't exist yet. Build it one phase at a time (constitution XIV); don't pull later-phase capabilities forward.
+All three MVP user stories are implemented end-to-end (schemas, planner, Block Kit approval cards, approve/reject/edit state machine, idempotent GitHub issue creation, Alembic-backed Postgres persistence) — 42 of 43 tasks in `.specify/specs/001-flowpilot-slack-mvp/tasks.md` are done, ruff/mypy clean, full test suite passing. The module layout below reflects real code, not a plan. `backend/main.py` (root) is a leftover hello-world stub unrelated to the real FastAPI entry point at `backend/app/main.py` — don't confuse the two.
+
+Remaining work: **T043**, the live in-Slack demo run in a real workspace with real credentials — manual, can't be automated.
 
 ## Commands
 
@@ -73,12 +75,16 @@ Approval state machine: `proposal_created -> pending_approval -> {approved | rej
 - Approved v1 dependencies only; introducing a new agent-orchestration framework (CrewAI, AutoGen, etc.) or a Slack vector DB requires a superseding ADR.
 
 <!-- SPECKIT START -->
-Active feature: **001-flowpilot-slack-mvp**. Read the plan and its design
+Active feature: **002-flowpilot-jira-integration**. Read the plan and its design
 artifacts for technologies, project structure, contracts, and validation steps:
-- Plan: `.specify/specs/001-flowpilot-slack-mvp/plan.md`
-- Spec: `.specify/specs/001-flowpilot-slack-mvp/spec.md`
-- Data model: `.specify/specs/001-flowpilot-slack-mvp/data-model.md`
-- Research: `.specify/specs/001-flowpilot-slack-mvp/research.md`
-- Contracts: `.specify/specs/001-flowpilot-slack-mvp/contracts/`
-- Quickstart (per-phase validation): `.specify/specs/001-flowpilot-slack-mvp/quickstart.md`
+- Plan: `.specify/specs/002-flowpilot-jira-integration/plan.md`
+- Spec: `.specify/specs/002-flowpilot-jira-integration/spec.md`
+- Data model: `.specify/specs/002-flowpilot-jira-integration/data-model.md`
+- Research: `.specify/specs/002-flowpilot-jira-integration/research.md`
+- Contracts: `.specify/specs/002-flowpilot-jira-integration/contracts/`
+- Quickstart (per-phase validation): `.specify/specs/002-flowpilot-jira-integration/quickstart.md`
+
+Prior feature **001-flowpilot-slack-mvp** (GitHub-only v1) is complete — its own plan/spec/contracts
+remain at `.specify/specs/001-flowpilot-slack-mvp/` and are still the source of truth for anything
+this feature's contracts don't override (e.g. `http-api.md`, `agent-schemas.md`, `tools/slack_rts.py`).
 <!-- SPECKIT END -->

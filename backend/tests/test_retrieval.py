@@ -47,3 +47,29 @@ async def test_retrieval_mode_is_always_a_valid_label(monkeypatch):
     monkeypatch.setattr(rts, "_rts_search", _boom)
     result = await rts.retrieve_context(query="x", event={"text": "y"}, mode="mock")
     assert result.retrieval_mode in {"rts", "mock", "event_payload"}
+
+
+@pytest.mark.asyncio
+async def test_rts_mode_calls_assistant_search_context(monkeypatch):
+    import tools.slack_rts as rts
+
+    captured = {}
+
+    class _FakeClient:
+        async def api_call(self, method, json):
+            captured["method"] = method
+            captured["json"] = json
+            return {"results": {"messages": [{"content": "hello from rts"}, {"content": ""}]}}
+
+    class _FakeBoltApp:
+        client = _FakeClient()
+
+    monkeypatch.setattr(rts, "bolt_app", _FakeBoltApp())
+    event = {"text": "plan it", "action_token": "AT123"}
+    result = await rts.retrieve_context(query="plan it", event=event, mode="rts")
+
+    assert result.retrieval_mode == "rts"
+    assert result.messages == ["hello from rts"]
+    assert captured["method"] == "assistant.search.context"
+    assert captured["json"]["query"] == "plan it"
+    assert captured["json"]["action_token"] == "AT123"

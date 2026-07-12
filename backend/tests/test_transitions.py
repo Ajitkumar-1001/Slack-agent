@@ -54,6 +54,118 @@ async def test_approve_records_decision_and_transitions_to_approved(db_session, 
 
 
 @pytest.mark.asyncio
+async def test_jira_only_target_creates_zero_github_issues(db_session, valid_plan_dict):
+    """T008 [US1] — Jira-only execution routing (AC-101; contracts/tool-adapters.md).
+
+    RED until T013 extends workflows/execute_plan.py with target_systems dispatch: a new
+    ``target_systems: list[str] | None = None`` param plus ``jira_create_remote``/
+    ``jira_search_remote`` injected callables alongside the existing GitHub ones, returning
+    ``list[tuple[Task, target_system, IssueOutcome]]`` instead of one outcome per task.
+    """
+    from db.models import ProposalStatus
+    from workflows.execute_plan import execute_plan
+
+    proposal = await _make_proposal(db_session, ProposalStatus.APPROVED, valid_plan_dict)
+    assert len(dict(valid_plan_dict)["tasks"]) == 1  # fixture has exactly one task
+
+    github_calls = {"n": 0}
+
+    async def github_create(_payload):
+        github_calls["n"] += 1
+        return ("1", "https://github.com/x/y/issues/1")
+
+    async def jira_create(_payload):
+        return ("PROJ-1", "https://example.atlassian.net/browse/PROJ-1")
+
+    outcomes = await execute_plan(
+        session=db_session, proposal=proposal, target_systems=["jira"],
+        create_remote=github_create, search_remote=_no_op_remote,
+        jira_create_remote=jira_create, jira_search_remote=_no_op_remote,
+    )
+
+    assert github_calls["n"] == 0
+    assert len(outcomes) == 1
+    _task, target_system, outcome = outcomes[0]
+    assert target_system == "jira"
+    assert outcome.status.value == "succeeded"
+    assert outcome.external_url == "https://example.atlassian.net/browse/PROJ-1"
+
+
+@pytest.mark.asyncio
+async def test_both_target_produces_ten_action_log_rows_for_five_tasks(db_session, valid_plan_dict):
+    """T015 [US2] — dual-target ActionLog test (FR-103, AC-102; contracts/tool-adapters.md).
+
+    Approving a 5-task plan with target Both must produce 10 ActionLog rows (5 github, 5 jira),
+    each with a distinct idempotency_key -- the idempotency-key fix (T003) folding target_system
+    into the hash is what makes this possible without a unique-constraint collision.
+    """
+    from db.models import ActionLog, ProposalStatus
+    from sqlalchemy import select
+    from workflows.execute_plan import execute_plan
+
+    plan = dict(valid_plan_dict)
+    plan["tasks"] = [
+        {"title": f"Task {i}", "description": "d", "milestone": None, "suggested_owner": None,
+         "priority": "medium", "acceptance_criteria": [], "dependencies": []}
+        for i in range(5)
+    ]
+    proposal = await _make_proposal(db_session, ProposalStatus.APPROVED, plan)
+
+    github_ids = iter(range(1, 100))
+    jira_ids = iter(range(1, 100))
+
+    async def github_create(_payload):
+        n = next(github_ids)
+        return (str(n), f"https://github.com/x/y/issues/{n}")
+
+    async def jira_create(_payload):
+        n = next(jira_ids)
+        return (f"PROJ-{n}", f"https://example.atlassian.net/browse/PROJ-{n}")
+
+    outcomes = await execute_plan(
+        session=db_session, proposal=proposal, target_systems=["both"],
+        create_remote=github_create, search_remote=_no_op_remote,
+        jira_create_remote=jira_create, jira_search_remote=_no_op_remote,
+    )
+    assert len(outcomes) == 10
+
+    rows = (await db_session.execute(select(ActionLog))).scalars().all()
+    assert len(rows) == 10
+    assert sorted(r.target_system for r in rows) == ["github"] * 5 + ["jira"] * 5
+    assert len({r.idempotency_key for r in rows}) == 10  # all distinct, no collisions
+
+
+@pytest.mark.asyncio
+async def test_both_target_isolates_per_system_failure(db_session, valid_plan_dict):
+    """T018 [US2] — cross-system failure isolation (AC-102/FR-017; contracts/tool-adapters.md).
+
+    When Jira fails for a task but GitHub succeeds for it under Both, both outcomes are recorded
+    independently -- neither system's write blocks the other, nor aborts the remaining tasks.
+    """
+    from db.models import ActionLogStatus, ProposalStatus
+    from workflows.execute_plan import execute_plan
+
+    proposal = await _make_proposal(db_session, ProposalStatus.APPROVED, valid_plan_dict)
+
+    async def github_create(_payload):
+        return ("1", "https://github.com/x/y/issues/1")
+
+    async def jira_create_fails(_payload):
+        raise RuntimeError("Jira 500")
+
+    outcomes = await execute_plan(
+        session=db_session, proposal=proposal, target_systems=["both"],
+        create_remote=github_create, search_remote=_no_op_remote,
+        jira_create_remote=jira_create_fails, jira_search_remote=_no_op_remote,
+    )
+
+    assert len(outcomes) == 2
+    by_system = {system: outcome for _task, system, outcome in outcomes}
+    assert by_system["github"].status == ActionLogStatus.SUCCEEDED
+    assert by_system["jira"].status == ActionLogStatus.FAILED
+
+
+@pytest.mark.asyncio
 async def test_execute_transitions_to_executed(db_session, valid_plan_dict):
     from db.models import ProposalStatus
     from workflows.execute_plan import execute_plan

@@ -3,10 +3,12 @@
 No other module retrieves Slack context. Retrieved context is used for the active plan
 then discarded — never persisted or indexed.
 """
-from typing import Literal
+from typing import Any, Literal
 
 import structlog
 from pydantic import BaseModel
+
+from slack.app import bolt_app
 
 log = structlog.get_logger()
 
@@ -23,16 +25,29 @@ class RetrievalResult(BaseModel):
     retrieval_mode: RetrievalMode
 
 
-async def _rts_search(query: str) -> list[str]:
+async def _rts_search(*, query: str, event: dict) -> list[str]:
     """The ONLY outbound network seam — the real Slack Real-Time Search API call.
 
-    ponytail: production RTS call is stubbed. The demo/test paths (mock, event_payload)
-    are fully functional per ADR-005; wire this to the live Slack RTS API once a workspace
-    with RTS enabled is available (research.md flagged confirming its exact field names here).
+    Calls `assistant.search.context` (docs.slack.dev/apis/web-api/real-time-search-api/).
+    Bot-token calls require the `action_token` delivered on the triggering event.
+
+    ponytail: response field names are sourced from Slack's public API docs, not verified
+    against a live call (no RTS-enabled workspace available yet) — if the real response
+    shape differs, this is the only place that needs adjusting.
     """
-    raise NotImplementedError(
-        "Slack RTS production call not yet wired; use mode='mock' or 'event_payload' (ADR-005)"
+    response = await bolt_app.client.api_call(
+        "assistant.search.context",
+        json={
+            "query": query,
+            "action_token": event.get("action_token"),
+            "content_types": ["messages"],
+            "channel_types": ["public_channel", "private_channel", "mpim", "im"],
+            "limit": 20,
+        },
     )
+    results: dict[str, Any] = response.get("results") or {}
+    messages: list[dict[str, Any]] = results.get("messages") or []
+    return [m["content"] for m in messages if m.get("content")]
 
 
 async def retrieve_context(*, query: str, event: dict, mode: str) -> RetrievalResult:
@@ -44,7 +59,9 @@ async def retrieve_context(*, query: str, event: dict, mode: str) -> RetrievalRe
             messages=[text] if text else [], retrieval_mode="event_payload"
         )
     else:
-        result = RetrievalResult(messages=await _rts_search(query), retrieval_mode="rts")
+        result = RetrievalResult(
+            messages=await _rts_search(query=query, event=event), retrieval_mode="rts"
+        )
 
     log.info(
         "slack_rts_retrieval",

@@ -39,6 +39,54 @@ def test_approval_card_has_required_fields_and_action_ids(valid_plan_dict):
     assert "prop-123" in text
 
 
+def test_approval_card_includes_target_system_selector_and_encodes_approve_value(valid_plan_dict):
+    """T007 [US1] — target-system selector (FR-101; contracts/block-kit.md).
+
+    RED until T010 extends render_approval_card with the GitHub/Jira/Both static_select and
+    changes the Approve button's value to "{proposal_id}|{target_system}" (Edit/Reject unchanged).
+    """
+    from agents.schemas import ProjectPlan
+    from slack.blocks import render_approval_card
+
+    plan = ProjectPlan(**valid_plan_dict)
+    blocks = render_approval_card(
+        proposal_id="prop-123", plan=plan, action_summary="Create 1 Jira ticket", target_system="jira"
+    )
+
+    elements = [el for b in blocks if b.get("type") == "actions" for el in b.get("elements", [])]
+
+    select = next(el for el in elements if el.get("action_id") == "select_target_system")
+    assert select["type"] == "static_select"
+    assert {opt["value"] for opt in select["options"]} == {"github", "jira", "both"}
+    assert select["initial_option"]["value"] == "jira"
+
+    approve = next(el for el in elements if el.get("action_id") == "approve_plan")
+    assert approve["value"] == "prop-123|jira"
+
+    # Edit Plan / Reject are unaffected by the target-system choice — they create zero artifacts
+    edit = next(el for el in elements if el.get("action_id") == "edit_plan")
+    reject = next(el for el in elements if el.get("action_id") == "reject_plan")
+    assert edit["value"] == "prop-123"
+    assert reject["value"] == "prop-123"
+
+
+def test_approval_card_defaults_target_system_selector_to_github(valid_plan_dict):
+    """T007 [US1] — AC-105: no target_system passed -> defaults to settings.default_target_system
+    ("github" out of the box), so a no-Jira deployment's card looks the same as v1's."""
+    from agents.schemas import ProjectPlan
+    from slack.blocks import render_approval_card
+
+    plan = ProjectPlan(**valid_plan_dict)
+    blocks = render_approval_card(proposal_id="prop-1", plan=plan, action_summary="Create 1 GitHub issue")
+
+    elements = [el for b in blocks if b.get("type") == "actions" for el in b.get("elements", [])]
+    select = next(el for el in elements if el.get("action_id") == "select_target_system")
+    assert select["initial_option"]["value"] == "github"
+
+    approve = next(el for el in elements if el.get("action_id") == "approve_plan")
+    assert approve["value"] == "prop-1|github"
+
+
 def test_stakeholder_summary_includes_links_risks_and_partial_breakdown():
     """T030 [US2] — stakeholder-summary payload (FR-016/FR-017). RED until T034 adds
     render_stakeholder_summary to slack/blocks.py.

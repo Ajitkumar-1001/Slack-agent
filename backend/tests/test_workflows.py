@@ -56,3 +56,48 @@ async def test_posts_ack_and_interim_update_before_the_card(monkeypatch, valid_p
     # the approval card (a blocks list) is the final post; everything before it is a text status message
     assert isinstance(posted[-1], list)
     assert all(isinstance(p, str) for p in posted[:-1])
+
+
+@pytest.mark.asyncio
+async def test_both_target_creates_one_github_issue_and_one_jira_ticket_per_task(
+    db_session, valid_plan_dict
+):
+    """T016 [US2] — dual-target artifact test (AC-102; contracts/tool-adapters.md).
+
+    Approving a plan with target Both must produce exactly one GitHub issue and one Jira
+    ticket per approved task -- not a shared or collapsed write across systems.
+    """
+    from db.models import ExternalArtifact, ProjectProposal, ProposalStatus
+    from sqlalchemy import select
+    from workflows.execute_plan import execute_plan
+
+    proposal = ProjectProposal(
+        slack_channel_id="C1", slack_thread_ts="1.2", requested_by_user_id="U1",
+        project_name="P", objective="O", timeline=None, status=ProposalStatus.APPROVED,
+        plan_json=dict(valid_plan_dict), risk_json={},
+    )
+    db_session.add(proposal)
+    await db_session.commit()
+
+    async def no_op(_key):
+        return None
+
+    async def github_create(_payload):
+        return ("1", "https://github.com/x/y/issues/1")
+
+    async def jira_create(_payload):
+        return ("PROJ-1", "https://example.atlassian.net/browse/PROJ-1")
+
+    outcomes = await execute_plan(
+        session=db_session, proposal=proposal, target_systems=["both"],
+        create_remote=github_create, search_remote=no_op,
+        jira_create_remote=jira_create, jira_search_remote=no_op,
+    )
+
+    assert len(outcomes) == 2  # one task x two systems
+    assert sorted(system for _task, system, _outcome in outcomes) == ["github", "jira"]
+
+    artifacts = (await db_session.execute(select(ExternalArtifact))).scalars().all()
+    assert sorted(a.system for a in artifacts) == ["github", "jira"]
+    assert next(a for a in artifacts if a.system == "github").artifact_type == "issue"
+    assert next(a for a in artifacts if a.system == "jira").artifact_type == "ticket"

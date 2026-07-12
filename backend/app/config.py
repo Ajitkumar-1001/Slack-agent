@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,6 +15,13 @@ class Settings(BaseSettings):
     github_token: str
     github_owner: str
     github_repo: str
+    # Jira fields are optional (unlike github_* above) so a deployment with no Jira
+    # configured still instantiates Settings() cleanly (AC-105) — see research.md Decision 2.
+    jira_base_url: str | None = None
+    jira_email: str | None = None
+    jira_api_token: str | None = None
+    jira_project_key: str | None = None
+    default_target_system: Literal["github", "jira", "both"] = "github"
     log_level: str = "INFO"
 
 
