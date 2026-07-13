@@ -18,16 +18,20 @@ jobs:
         with:
           working-directory: backend
           enable-cache: true
-          cache-dependency-glob: "backend/uv.lock"
+          cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
+        id: install
         run: uv sync --locked
 
       - name: Lint
+        if: always() && steps.install.outcome == 'success'
         run: uv run ruff check .
 
       - name: Type check
+        if: always() && steps.install.outcome == 'success'
         run: uv run mypy .
 
       - name: Test
+        if: always() && steps.install.outcome == 'success'
         run: uv run pytest
