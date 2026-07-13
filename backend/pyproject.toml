@@ -10,6 +10,7 @@ dependencies = [
     "anthropic>=0.116.0",
     "asyncpg>=0.31.0",
     "fastapi>=0.138.0",
+    "google-auth>=2.47.0",
     "httpx>=0.28.1",
     "langchain-core>=1.4.8",
     "langgraph>=1.2.6",

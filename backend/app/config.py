@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     notion_api_key: str | None = None
     notion_parent_page_id: str | None = None
     default_notion_enabled: bool = False
+    # Google Drive fields are optional, same reason as jira_*/notion_* above (AC-302) — see
+    # research.md Decision 6 (004-flowpilot-google-drive-integration).
+    google_drive_credentials: str | None = None
+    google_drive_folder_scope: str | None = None
+    default_google_drive_enabled: bool = False
     log_level: str = "INFO"
 
 

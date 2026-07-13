@@ -101,3 +101,178 @@ async def test_both_target_creates_one_github_issue_and_one_jira_ticket_per_task
     assert sorted(a.system for a in artifacts) == ["github", "jira"]
     assert next(a for a in artifacts if a.system == "github").artifact_type == "issue"
     assert next(a for a in artifacts if a.system == "jira").artifact_type == "ticket"
+
+
+@pytest.mark.asyncio
+async def test_drive_enabled_configured_merges_tagged_context(monkeypatch, valid_plan_dict):
+    """T006 [US1] — context-merge tagging (FR-303; contracts/tool-adapters.md).
+
+    RED until T011 extends create_plan.py's Context Retrieval step.
+
+    Interface imposed on T011: create_plan.py imports the Drive adapter as
+    ``import tools.google_drive as google_drive`` (qualified, not ``from ... import retrieve_context``,
+    which would collide with Slack RTS's own ``retrieve_context`` name already imported there) and,
+    when ``settings.default_google_drive_enabled and settings.google_drive_credentials``, merges
+    ``[slack] ...``-tagged Slack messages with ``[drive] ...``-tagged Drive documents (Slack entries
+    first) into the single ``context`` list passed to ``generate_plan``.
+    """
+    import workflows.create_plan as cp
+    from agents.schemas import ProjectPlan
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "default_google_drive_enabled", True)
+    monkeypatch.setattr(settings, "google_drive_credentials", '{"fake": "creds"}')
+
+    class _SlackResult:
+        retrieval_mode = "mock"
+        messages = ["slack context here"]
+
+    class _DriveResult:
+        retrieval_mode = "drive"
+        documents = ["drive context here"]
+
+    captured_context = {}
+
+    async def fake_slack_retrieve(*args, **kwargs):
+        return _SlackResult()
+
+    async def fake_drive_retrieve(*args, **kwargs):
+        return _DriveResult()
+
+    async def fake_generate(*, query, context):
+        captured_context["value"] = context
+        return ProjectPlan(**valid_plan_dict)
+
+    class _Proposal:
+        id = "prop-xyz"
+
+    async def fake_persist(event, plan):
+        return _Proposal()
+
+    async def fake_say(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(cp, "retrieve_context", fake_slack_retrieve)
+    monkeypatch.setattr(cp.google_drive, "retrieve_context", fake_drive_retrieve)
+    monkeypatch.setattr(cp, "generate_plan", fake_generate)
+    monkeypatch.setattr(cp, "persist_proposal", fake_persist)
+
+    await cp.create_plan(
+        event={"text": "onboarding", "channel": "C1", "ts": "1.2"}, say=fake_say
+    )
+
+    assert captured_context["value"] == ["[slack] slack context here", "[drive] drive context here"]
+
+
+@pytest.mark.asyncio
+async def test_drive_disabled_or_unconfigured_never_calls_adapter(monkeypatch, valid_plan_dict):
+    """T012 [US2] — config-gate zero-calls (AC-302; research.md Decision 5).
+
+    Covers both halves of the gate: disabled outright, and enabled but uncredentialed.
+    google_drive.retrieve_context must never be invoked in either case — not called-and-
+    short-circuited, actually never invoked.
+    """
+    import workflows.create_plan as cp
+    from agents.schemas import ProjectPlan
+    from app.config import settings
+
+    class _SlackResult:
+        retrieval_mode = "mock"
+        messages = ["slack only"]
+
+    calls = {"n": 0}
+
+    async def fake_slack_retrieve(*args, **kwargs):
+        return _SlackResult()
+
+    async def fake_drive_retrieve(*args, **kwargs):
+        calls["n"] += 1
+        raise AssertionError("google_drive.retrieve_context must not be called")
+
+    async def fake_generate(*, query, context):
+        return ProjectPlan(**valid_plan_dict)
+
+    class _Proposal:
+        id = "prop-xyz"
+
+    async def fake_persist(event, plan):
+        return _Proposal()
+
+    async def fake_say(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(cp, "retrieve_context", fake_slack_retrieve)
+    monkeypatch.setattr(cp.google_drive, "retrieve_context", fake_drive_retrieve)
+    monkeypatch.setattr(cp, "generate_plan", fake_generate)
+    monkeypatch.setattr(cp, "persist_proposal", fake_persist)
+
+    # Case 1: disabled outright
+    monkeypatch.setattr(settings, "default_google_drive_enabled", False)
+    monkeypatch.setattr(settings, "google_drive_credentials", None)
+    await cp.create_plan(event={"text": "x", "channel": "C1", "ts": "1.2"}, say=fake_say)
+    assert calls["n"] == 0
+
+    # Case 2: enabled but no credentials configured
+    monkeypatch.setattr(settings, "default_google_drive_enabled", True)
+    monkeypatch.setattr(settings, "google_drive_credentials", None)
+    await cp.create_plan(event={"text": "x", "channel": "C1", "ts": "1.2"}, say=fake_say)
+    assert calls["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_drive_enabled_but_adapter_fails_create_plan_still_completes(
+    monkeypatch, valid_plan_dict
+):
+    """T014 [US2] — end-to-end resilience (AC-303).
+
+    Uses the REAL google_drive.retrieve_context (left un-mocked) so its own internal
+    try/except containment (T009) is genuinely exercised through create_plan end-to-end —
+    only the lower-level _get_access_token seam is forced to fail. This deliberately does NOT
+    mock google_drive.retrieve_context itself away, since research.md Decision 5 puts failure
+    containment inside the adapter, not create_plan.py — a test that bypassed the real adapter
+    and made the mock raise directly would test a scenario T009's own contract rules out.
+    """
+    import tools.google_drive as gd
+    import workflows.create_plan as cp
+    from agents.schemas import ProjectPlan
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "default_google_drive_enabled", True)
+    monkeypatch.setattr(settings, "google_drive_credentials", '{"fake": "creds"}')
+
+    async def failing_token():
+        raise RuntimeError("simulated hard Drive failure")
+
+    monkeypatch.setattr(gd, "_get_access_token", failing_token)
+
+    class _SlackResult:
+        retrieval_mode = "mock"
+        messages = ["slack only"]
+
+    posted: list = []
+
+    async def fake_say(*args, **kwargs):
+        if "blocks" in kwargs:
+            posted.append(kwargs["blocks"])
+        else:
+            posted.append(kwargs.get("text", args[0] if args else None))
+
+    async def fake_slack_retrieve(*args, **kwargs):
+        return _SlackResult()
+
+    async def fake_generate(*, query, context):
+        return ProjectPlan(**valid_plan_dict)
+
+    class _Proposal:
+        id = "prop-xyz"
+
+    async def fake_persist(event, plan):
+        return _Proposal()
+
+    monkeypatch.setattr(cp, "retrieve_context", fake_slack_retrieve)
+    monkeypatch.setattr(cp, "generate_plan", fake_generate)
+    monkeypatch.setattr(cp, "persist_proposal", fake_persist)
+
+    await cp.create_plan(event={"text": "x", "channel": "C1", "ts": "1.2"}, say=fake_say)
+
+    assert isinstance(posted[-1], list)  # the approval card still rendered despite the Drive failure

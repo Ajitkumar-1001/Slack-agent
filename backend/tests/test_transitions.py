@@ -305,6 +305,149 @@ async def test_execution_requires_approval(db_session, valid_plan_dict):
 
 
 @pytest.mark.asyncio
+async def test_create_plan_with_drive_creates_zero_actionlog_or_artifact_rows(
+    monkeypatch, db_session, valid_plan_dict
+):
+    """T016 [US3] — zero-persistence (AC-304).
+
+    Runs create_plan for real (not persist_proposal-mocked) against the test's in-memory DB,
+    with Drive enabled and returning content, and confirms Drive retrieval itself writes no
+    ActionLog/ExternalArtifact row — it has no write path of any kind (FR-305). Also confirms
+    the persisted plan_json contains no raw Drive file content beyond whatever evidence_summary
+    the (mocked, fixture-returning) planner itself produced.
+    """
+    import json
+
+    import workflows.create_plan as cp
+    from agents.schemas import ProjectPlan
+    from app.config import settings
+    from db.models import ActionLog, ExternalArtifact, ProjectProposal
+    from sqlalchemy import select
+
+    monkeypatch.setattr(settings, "default_google_drive_enabled", True)
+    monkeypatch.setattr(settings, "google_drive_credentials", '{"fake": "creds"}')
+
+    class _SingleSessionFactory:
+        """Adapts a single already-open test session to async_session_factory()'s
+        `async with factory() as session` call shape, so create_plan.persist_proposal's real
+        code path runs against the in-memory db_session fixture instead of the real (unreachable
+        in tests) Postgres async_session_factory."""
+
+        def __init__(self, session):
+            self._session = session
+
+        def __call__(self):
+            return self
+
+        async def __aenter__(self):
+            return self._session
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+    monkeypatch.setattr(cp, "async_session_factory", _SingleSessionFactory(db_session))
+
+    class _SlackResult:
+        retrieval_mode = "mock"
+        messages = ["slack context"]
+
+    class _DriveResult:
+        retrieval_mode = "drive"
+        documents = ["drive doc content that must never be persisted verbatim"]
+
+    async def fake_slack_retrieve(*args, **kwargs):
+        return _SlackResult()
+
+    async def fake_drive_retrieve(*args, **kwargs):
+        return _DriveResult()
+
+    async def fake_generate(*, query, context):
+        return ProjectPlan(**valid_plan_dict)
+
+    async def fake_say(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(cp, "retrieve_context", fake_slack_retrieve)
+    monkeypatch.setattr(cp.google_drive, "retrieve_context", fake_drive_retrieve)
+    monkeypatch.setattr(cp, "generate_plan", fake_generate)
+
+    await cp.create_plan(event={"text": "x", "channel": "C1", "ts": "1.2"}, say=fake_say)
+
+    action_rows = (await db_session.execute(select(ActionLog))).scalars().all()
+    artifact_rows = (await db_session.execute(select(ExternalArtifact))).scalars().all()
+    assert action_rows == []
+    assert artifact_rows == []
+
+    proposals = (await db_session.execute(select(ProjectProposal))).scalars().all()
+    assert len(proposals) == 1
+    assert "drive doc content" not in json.dumps(proposals[0].plan_json)
+
+
+@pytest.mark.asyncio
+async def test_execute_plan_identical_regardless_of_drive_tagged_evidence_summary(
+    db_session, valid_plan_dict
+):
+    """T017 [US3] — non-interference regression (AC-305), execution + audit-log side.
+
+    execute_plan never reads evidence_summary — a Drive-grounded proposal's ActionLog rows and
+    outcomes must match test_execute_transitions_to_executed's Slack-only equivalent exactly.
+    """
+    from db.models import ActionLog, ProposalStatus
+    from sqlalchemy import select
+    from workflows.execute_plan import execute_plan
+
+    drive_grounded_plan = dict(valid_plan_dict)
+    drive_grounded_plan["evidence_summary"] = [
+        "[slack] Thread references a Q3 launch commitment",
+        "[drive] Project charter excerpt",
+    ]
+
+    proposal = await _make_proposal(db_session, ProposalStatus.APPROVED, drive_grounded_plan)
+
+    outcomes, notion_outcome = await execute_plan(
+        session=db_session, proposal=proposal, create_remote=_ok_create, search_remote=_no_op_remote
+    )
+
+    assert len(outcomes) == 1
+    _task, target_system, outcome = outcomes[0]
+    assert target_system == "github"
+    assert outcome.status.value == "succeeded"
+    assert notion_outcome is None
+    assert proposal.status == ProposalStatus.EXECUTED
+
+    rows = (await db_session.execute(select(ActionLog))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].target_system == "github"
+
+
+@pytest.mark.asyncio
+async def test_reject_identical_regardless_of_drive_tagged_evidence_summary(db_session, valid_plan_dict):
+    """T017 [US3] — non-interference regression (AC-305), reject path."""
+    from db.models import ActionLog, ApprovalDecision, ProposalStatus
+    from sqlalchemy import select
+    from workflows.approve_plan import reject_plan
+
+    drive_grounded_plan = dict(valid_plan_dict)
+    drive_grounded_plan["evidence_summary"] = [
+        "[slack] Thread references a Q3 launch commitment",
+        "[drive] Project charter excerpt",
+    ]
+
+    proposal = await _make_proposal(db_session, ProposalStatus.PENDING_APPROVAL, drive_grounded_plan)
+
+    await reject_plan(session=db_session, proposal_id=str(proposal.id), user_id="U2")
+
+    refreshed = await db_session.get(type(proposal), proposal.id)
+    assert refreshed.status == ProposalStatus.REJECTED
+
+    decisions = (await db_session.execute(select(ApprovalDecision))).scalars().all()
+    assert [d.decision.value for d in decisions] == ["rejected"]
+
+    action_rows = (await db_session.execute(select(ActionLog))).scalars().all()
+    assert action_rows == []  # identical to the Slack-only reject guarantee
+
+
+@pytest.mark.asyncio
 async def test_approve_unknown_proposal_raises(db_session):
     from workflows.approve_plan import approve_plan
 

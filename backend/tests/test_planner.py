@@ -55,3 +55,44 @@ async def test_always_invalid_safe_fails_without_surfacing_a_plan(monkeypatch):
     with pytest.raises(planner.PlanGenerationError):
         await planner.generate_plan(query="launch onboarding", context=[])
     assert calls["n"] == 2  # retried once then safe-failed, never returned a malformed plan
+
+
+def test_build_user_message_renders_mixed_source_context_under_one_header():
+    """T007 [US1] — tagged-context rendering (FR-303; contracts/context-retrieval.md).
+
+    RED until T010 renames agents/prompts.py's context-block header from
+    "Retrieved Slack context:" to "Retrieved context:".
+    """
+    from agents.prompts import build_user_message
+
+    msg = build_user_message(
+        "launch onboarding", ["[slack] thread says Q3", "[drive] spec doc excerpt"]
+    )
+
+    assert "Retrieved context:" in msg
+    assert "- [slack] thread says Q3" in msg
+    assert "- [drive] spec doc excerpt" in msg
+
+
+def test_build_user_message_empty_context_still_renders_none_available():
+    """T007 [US1] — empty-context wording updates but behavior doesn't regress."""
+    from agents.prompts import build_user_message
+
+    msg = build_user_message("launch onboarding", [])
+
+    assert "Retrieved context: (none available)" in msg
+
+
+def test_system_prompt_instructs_preserving_source_tag_in_evidence_summary():
+    """T008 [US1] — SYSTEM_PROMPT source-tag-preservation instruction (FR-303; research.md Decision 3).
+
+    RED until T010 adds this rule to SYSTEM_PROMPT. This only checks the instruction text exists —
+    it cannot assert real-model compliance, which every _call_model-mocking test in this file is
+    structurally unable to exercise; that's covered only by quickstart.md's manual end-to-end demo.
+    """
+    from agents.prompts import SYSTEM_PROMPT
+
+    lowered = SYSTEM_PROMPT.lower()
+    assert "evidence_summary" in lowered
+    assert "preserve" in lowered
+    assert "[slack]" in lowered or "[drive]" in lowered or "[source]" in lowered

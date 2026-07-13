@@ -1,4 +1,4 @@
-"""Create-plan workflow: request -> ack + progress -> RTS context -> plan -> persist -> card.
+"""Create-plan workflow: request -> ack + progress -> RTS/Drive context -> plan -> persist -> card.
 
 No external writes here (US1): the only persistence is the proposal itself (pending approval).
 """
@@ -7,8 +7,10 @@ from typing import Any
 
 import structlog
 
+import tools.google_drive as google_drive
 from agents.planner import generate_plan
 from agents.schemas import ProjectPlan
+from app.config import settings
 from db.models import ProjectProposal, ProposalStatus
 from db.repository import ProposalRepository
 from db.session import async_session_factory
@@ -48,13 +50,32 @@ async def create_plan(*, event: dict, say: Say) -> None:
     query = event.get("text", "")
 
     await say(text="Searching relevant Slack context…")
-    context = await retrieve_context(query=query, event=event, mode=_DEFAULT_RETRIEVAL_MODE)
+    slack_context = await retrieve_context(query=query, event=event, mode=_DEFAULT_RETRIEVAL_MODE)
+
+    drive_documents: list[str] = []
+    drive_retrieval_mode = "disabled"
+    if settings.default_google_drive_enabled and settings.google_drive_credentials:
+        await say(text="Searching relevant Google Drive context…")
+        drive_result = await google_drive.retrieve_context(
+            query=query, folder_scope=settings.google_drive_folder_scope
+        )
+        drive_documents = drive_result.documents
+        drive_retrieval_mode = drive_result.retrieval_mode
+
+    context = [f"[slack] {m}" for m in slack_context.messages] + [
+        f"[drive] {d}" for d in drive_documents
+    ]
 
     await say(text="Drafting execution plan…")
-    plan = await generate_plan(query=query, context=context.messages)
+    plan = await generate_plan(query=query, context=context)
 
     proposal = await persist_proposal(event, plan)
-    log.info("proposal_created", proposal_id=str(proposal.id), retrieval_mode=context.retrieval_mode)
+    log.info(
+        "proposal_created",
+        proposal_id=str(proposal.id),
+        retrieval_mode=slack_context.retrieval_mode,
+        drive_retrieval_mode=drive_retrieval_mode,
+    )
 
     card = render_approval_card(
         proposal_id=str(proposal.id),

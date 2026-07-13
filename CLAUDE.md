@@ -75,18 +75,23 @@ Approval state machine: `proposal_created -> pending_approval -> {approved | rej
 - Approved v1 dependencies only; introducing a new agent-orchestration framework (CrewAI, AutoGen, etc.) or a Slack vector DB requires a superseding ADR.
 
 <!-- SPECKIT START -->
-Active feature: **003-flowpilot-notion-integration**. Read the plan and its design
+Active feature: **004-flowpilot-google-drive-integration**. Design source
+`ADR-009-Google-Drive-Readonly-Retrieval-Adapter` is Status **Proposed — not Accepted**
+(three Open Questions still blocking; see plan.md Complexity Tracking) — this plan proceeds
+on its recommended defaults without treating them as settled. Read the plan and its design
 artifacts for technologies, project structure, contracts, and validation steps:
-- Plan: `.specify/specs/003-flowpilot-notion-integration/plan.md`
-- Spec: `.specify/specs/003-flowpilot-notion-integration/spec.md`
-- Data model: `.specify/specs/003-flowpilot-notion-integration/data-model.md`
-- Research: `.specify/specs/003-flowpilot-notion-integration/research.md`
-- Contracts: `.specify/specs/003-flowpilot-notion-integration/contracts/`
-- Quickstart (per-phase validation): `.specify/specs/003-flowpilot-notion-integration/quickstart.md`
+- Plan: `.specify/specs/004-flowpilot-google-drive-integration/plan.md`
+- Spec: `.specify/specs/004-flowpilot-google-drive-integration/spec.md`
+- Data model: `.specify/specs/004-flowpilot-google-drive-integration/data-model.md`
+- Research: `.specify/specs/004-flowpilot-google-drive-integration/research.md`
+- Contracts: `.specify/specs/004-flowpilot-google-drive-integration/contracts/`
+- Quickstart (per-phase validation): `.specify/specs/004-flowpilot-google-drive-integration/quickstart.md`
 
-Prior features **001-flowpilot-slack-mvp** (GitHub-only v1) and **002-flowpilot-jira-integration**
-(Jira/Both routing) are complete — their own plan/spec/contracts remain at
-`.specify/specs/001-flowpilot-slack-mvp/` and `.specify/specs/002-flowpilot-jira-integration/` and
-are still the source of truth for anything this feature's contracts don't override (e.g.
-`http-api.md`, `agent-schemas.md`, `tools/slack_rts.py`, `tools/github.py`, `tools/jira.py`).
+Prior features **001-flowpilot-slack-mvp** (GitHub-only v1), **002-flowpilot-jira-integration**
+(Jira/Both routing), and **003-flowpilot-notion-integration** (Notion project briefs) are
+complete — their own plan/spec/contracts remain at `.specify/specs/001-flowpilot-slack-mvp/`,
+`.specify/specs/002-flowpilot-jira-integration/`, and `.specify/specs/003-flowpilot-notion-integration/`
+and are still the source of truth for anything this feature's contracts don't override (e.g.
+`http-api.md`, `agent-schemas.md`, `block-kit.md`, `tools/slack_rts.py`, `tools/github.py`,
+`tools/jira.py`, `tools/notion.py`).
 <!-- SPECKIT END -->

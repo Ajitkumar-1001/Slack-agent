@@ -10,6 +10,32 @@ Interface imposed on T023:
 import json
 
 
+def test_approval_card_identical_regardless_of_drive_tagged_evidence_summary(valid_plan_dict):
+    """T017 [US3] — non-interference regression (AC-305).
+
+    render_approval_card never references evidence_summary — a Drive-grounded proposal's card
+    must render byte-identical to a Slack-only proposal's for the same plan otherwise.
+    """
+    from agents.schemas import ProjectPlan
+    from slack.blocks import render_approval_card
+
+    slack_only = dict(valid_plan_dict)
+    drive_grounded = dict(valid_plan_dict)
+    drive_grounded["evidence_summary"] = [
+        "[slack] Thread references a Q3 launch commitment",
+        "[drive] Project charter excerpt",
+    ]
+
+    blocks_slack_only = render_approval_card(
+        proposal_id="prop-123", plan=ProjectPlan(**slack_only), action_summary="Create 1 GitHub issue"
+    )
+    blocks_drive_grounded = render_approval_card(
+        proposal_id="prop-123", plan=ProjectPlan(**drive_grounded), action_summary="Create 1 GitHub issue"
+    )
+
+    assert blocks_slack_only == blocks_drive_grounded
+
+
 def test_approval_card_has_required_fields_and_action_ids(valid_plan_dict):
     from agents.schemas import ProjectPlan
     from slack.blocks import render_approval_card
