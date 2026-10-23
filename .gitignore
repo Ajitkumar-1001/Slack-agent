@@ -13,12 +13,7 @@ node_modules/
 .next/
 out/
 
-Slack-agent/
 
-.claude/
-.specify/
-.cursor/
-graphify-out/
 
 # Agent / harness files (kept locally, not published)
 CLAUDE.md
