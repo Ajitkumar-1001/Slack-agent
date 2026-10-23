@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     google_drive_credentials: str | None = None
     google_drive_folder_scope: str | None = None
     default_google_drive_enabled: bool = False
+    # Live Slack RTS (FR-003). OFF keeps the ADR-005 event-payload fallback for the demo; ON still
+    # falls back to the event payload whenever the RTS call fails (tools/slack_rts.py).
+    slack_rts_enabled: bool = False
+    # Comma-separated Slack user IDs allowed to Approve/Reject/Edit any proposal, on top of the
+    # proposal's own requester (who always may). Empty = requester only (workflows/approve_plan.py).
+    flowpilot_approver_ids: str = ""
     log_level: str = "INFO"
 
 

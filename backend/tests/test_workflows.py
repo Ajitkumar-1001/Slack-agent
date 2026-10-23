@@ -59,6 +59,92 @@ async def test_posts_ack_and_interim_update_before_the_card(monkeypatch, valid_p
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error_kind", ["plan_generation", "validation", "anthropic"])
+async def test_planner_failure_replies_in_thread_and_persists_nothing(
+    monkeypatch, error_kind
+):
+    """FR-013 safe-fail: a planner failure posts a next-step reply in the request's thread,
+    persists no proposal, renders no card, and logs without raw Slack text."""
+    import anthropic
+    import httpx
+    import workflows.create_plan as cp
+    from agents.planner import PlanGenerationError
+    from pydantic import ValidationError
+    from structlog.testing import capture_logs
+
+    error = {
+        "plan_generation": PlanGenerationError(
+            "ProjectPlan validation failed after retry"
+        ),
+        "validation": ValidationError.from_exception_data("ProjectPlan", []),
+        "anthropic": anthropic.APIConnectionError(
+            request=httpx.Request("POST", "https://api.anthropic.com")
+        ),
+    }[error_kind]
+
+    posted: list = []
+
+    async def fake_say(*args, **kwargs):
+        posted.append(kwargs)
+
+    class _Result:
+        retrieval_mode = "mock"
+        messages = ["some grounding context"]
+
+    async def fake_retrieve(*args, **kwargs):
+        return _Result()
+
+    async def failing_generate(*args, **kwargs):
+        raise error
+
+    async def fake_persist(event, plan):
+        raise AssertionError("no proposal may be persisted when planning fails")
+
+    monkeypatch.setattr(cp, "retrieve_context", fake_retrieve)
+    monkeypatch.setattr(cp, "generate_plan", failing_generate)
+    monkeypatch.setattr(cp, "persist_proposal", fake_persist)
+
+    request_text = "launch the confidential onboarding revamp"
+    with capture_logs() as logs:
+        await cp.create_plan(
+            event={"text": request_text, "channel": "C1", "ts": "1.2"}, say=fake_say
+        )
+
+    assert not any("blocks" in p for p in posted)  # no approval card
+    assert "try again" in posted[-1]["text"] and "rephrase" in posted[-1]["text"]
+    assert posted[-1]["thread_ts"] == "1.2"
+
+    failures = [e for e in logs if e["event"] == "plan_generation_failed"]
+    assert failures and failures[0]["error_type"] == type(error).__name__
+    assert request_text not in repr(logs)
+
+
+@pytest.mark.asyncio
+async def test_unrelated_planner_exception_still_propagates(monkeypatch):
+    """FR-013 handling is scoped to planner/LLM errors — anything else must not be swallowed."""
+    import workflows.create_plan as cp
+
+    class _Result:
+        retrieval_mode = "mock"
+        messages = ["context"]
+
+    async def fake_retrieve(*args, **kwargs):
+        return _Result()
+
+    async def broken_generate(*args, **kwargs):
+        raise RuntimeError("bug")
+
+    async def fake_say(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(cp, "retrieve_context", fake_retrieve)
+    monkeypatch.setattr(cp, "generate_plan", broken_generate)
+
+    with pytest.raises(RuntimeError):
+        await cp.create_plan(event={"text": "x", "channel": "C1", "ts": "1.2"}, say=fake_say)
+
+
+@pytest.mark.asyncio
 async def test_both_target_creates_one_github_issue_and_one_jira_ticket_per_task(
     db_session, valid_plan_dict
 ):
@@ -276,3 +362,77 @@ async def test_drive_enabled_but_adapter_fails_create_plan_still_completes(
     await cp.create_plan(event={"text": "x", "channel": "C1", "ts": "1.2"}, say=fake_say)
 
     assert isinstance(posted[-1], list)  # the approval card still rendered despite the Drive failure
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rts_enabled", "rts_outcome", "expected_context", "expected_mode"),
+    [
+        # default OFF: RTS never called
+        (False, None, ["[slack] plan the launch"], "event_payload"),
+        (True, "ok", ["[slack] We committed to a Q3 launch."], "rts"),
+        # RTS down -> event-payload fallback
+        (True, "error", ["[slack] plan the launch"], "event_payload"),
+    ],
+)
+async def test_create_plan_slack_rts_flag_and_fallback(
+    monkeypatch,
+    valid_plan_dict,
+    rts_enabled,
+    rts_outcome,
+    expected_context,
+    expected_mode,
+):
+    """FR-003 / ADR-005: live RTS only behind ``settings.slack_rts_enabled`` (default OFF); any
+    RTS failure falls back to the event payload; RTS context reaches the planner, never the DB."""
+    import tools.slack_rts as rts
+    import workflows.create_plan as cp
+    from agents.schemas import ProjectPlan
+    from app.config import Settings, settings
+    from structlog.testing import capture_logs
+
+    assert Settings.model_fields["slack_rts_enabled"].default is False
+    monkeypatch.setattr(settings, "slack_rts_enabled", rts_enabled)
+    monkeypatch.setattr(settings, "default_google_drive_enabled", False)
+
+    rts_text = "We committed to a Q3 launch."
+    # counted, not raised: the adapter's fallback would swallow an AssertionError
+    rts_calls: list = []
+
+    async def fake_rts_search(*, query, event):
+        rts_calls.append(query)
+        if rts_outcome == "error":
+            raise ConnectionError("RTS unavailable")
+        return [rts_text]
+
+    captured: dict = {}
+
+    async def fake_generate(*, query, context):
+        captured["context"] = context
+        return ProjectPlan(**valid_plan_dict)
+
+    class _Proposal:
+        id = "prop-xyz"
+
+    async def fake_persist(event, plan):
+        captured["persisted"] = repr((event, plan))
+        return _Proposal()
+
+    async def fake_say(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(rts, "_rts_search", fake_rts_search)
+    monkeypatch.setattr(cp, "generate_plan", fake_generate)
+    monkeypatch.setattr(cp, "persist_proposal", fake_persist)
+
+    with capture_logs() as logs:
+        await cp.create_plan(
+            event={"text": "plan the launch", "channel": "C1", "ts": "1.2"},
+            say=fake_say,
+        )
+
+    assert len(rts_calls) == (1 if rts_enabled else 0)
+    assert captured["context"] == expected_context
+    assert rts_text not in captured["persisted"]
+    created = [e for e in logs if e["event"] == "proposal_created"]
+    assert created[0]["retrieval_mode"] == expected_mode

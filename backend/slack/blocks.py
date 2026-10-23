@@ -21,12 +21,57 @@ _NOTION_CHECKBOX_OPTION = {
     "value": "notion_brief",
 }
 
+_SYSTEM_ORDER = ("github", "jira")
+_SYSTEM_LABELS = {"github": ("GitHub", "issue"), "jira": ("Jira", "ticket")}
+
+# The task count rides in this section's block_id ("proposed_actions|N") so the in-place
+# select/checkbox handlers can re-derive the text without a DB read.
+_PROPOSED_ACTIONS_BLOCK_ID = "proposed_actions"
+
+
+def _proposed_actions_block(
+    task_count: int, target_system: str, notion_enabled: bool
+) -> dict:
+    """FR-009: the card's proposed external actions, naming the selected target system(s)."""
+    systems = _SYSTEM_ORDER if target_system == "both" else (target_system,)
+    parts = [
+        f"{task_count} {label} {noun}{'s' if task_count != 1 else ''}"
+        for label, noun in (_SYSTEM_LABELS[s] for s in systems)
+    ]
+    if notion_enabled:
+        parts.append("1 Notion project brief")
+    return {
+        "type": "section",
+        "block_id": f"{_PROPOSED_ACTIONS_BLOCK_ID}|{task_count}",
+        "text": {
+            "type": "mrkdwn",
+            "text": f"*Proposed actions:* Create {' + '.join(parts)}",
+        },
+    }
+
+
+def refresh_proposed_actions(blocks: list[dict]) -> None:
+    """Re-derive the proposed-actions section in place from the Approve button's value, so after a
+    select_target_system/select_notion_brief re-render the card describes exactly what Approve runs."""
+    approve_value = next(
+        el["value"]
+        for block in blocks
+        for el in block.get("elements", [])
+        if el.get("action_id") == "approve_plan"
+    )
+    _proposal_id, target_system, notion_flag = approve_value.split("|", 2)
+    for i, block in enumerate(blocks):
+        block_id, _, task_count = block.get("block_id", "").partition("|")
+        if block_id == _PROPOSED_ACTIONS_BLOCK_ID:
+            blocks[i] = _proposed_actions_block(
+                int(task_count), target_system, notion_flag == "true"
+            )
+
 
 def render_approval_card(
     *,
     proposal_id: str,
     plan: ProjectPlan,
-    action_summary: str,
     target_system: str = settings.default_target_system,
     notion_enabled: bool = settings.default_notion_enabled,
 ) -> list[dict]:
@@ -74,10 +119,7 @@ def render_approval_card(
             "type": "section",
             "text": {"type": "mrkdwn", "text": f"*Top risks:*\n{risk_lines}"},
         },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*Proposed actions:* {action_summary}"},
-        },
+        _proposed_actions_block(len(plan.tasks), target_system, notion_enabled),
         {
             "type": "actions",
             "block_id": "target_system_select",
@@ -141,10 +183,6 @@ def render_already_decided_notice(*, status: str) -> str:
         f"This plan is already *{status.removeprefix('proposal_')}* — the first decision wins, "
         "so no further action was taken."
     )
-
-
-_SYSTEM_ORDER = ("github", "jira")
-_SYSTEM_LABELS = {"github": ("GitHub", "issue"), "jira": ("Jira", "ticket")}
 
 
 def render_stakeholder_summary(

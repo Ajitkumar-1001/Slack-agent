@@ -12,9 +12,14 @@ from agents.schemas import ProjectPlan
 from db.models import ActionLogStatus
 from db.session import async_session_factory
 from slack.app import bolt_app
-from slack.blocks import render_already_decided_notice, render_stakeholder_summary
+from slack.blocks import (
+    refresh_proposed_actions,
+    render_already_decided_notice,
+    render_stakeholder_summary,
+)
 from workflows.approve_plan import (
     DecisionLockedError,
+    NotAuthorizedError,
     approve_plan,
     reject_plan,
     request_edit,
@@ -23,6 +28,23 @@ from workflows.create_plan import create_plan
 from workflows.execute_plan import execute_plan
 
 log = structlog.get_logger()
+
+
+async def _notify_not_allowed(
+    respond: Any, exc: NotAuthorizedError, attempted: str
+) -> None:
+    """A click from someone who is neither the requester nor an allowlisted approver: ephemeral
+    refusal, no state change, no artifact. Audited via a structured warning, like FR-021."""
+    log.warning(
+        "decision_unauthorized",
+        proposal_id=exc.proposal_id,
+        user_id=exc.user_id,
+        attempted=attempted,
+    )
+    await respond(
+        text="You're not allowed to act on this plan — only its requester or an approver can.",
+        response_type="ephemeral",
+    )
 
 
 async def _notify_already_decided(respond: Any, exc: DecisionLockedError, attempted: str) -> None:
@@ -44,8 +66,8 @@ async def _notify_already_decided(respond: Any, exc: DecisionLockedError, attemp
 async def handle_select_target_system(ack: Any, body: dict, action: dict, respond: Any) -> None:
     """FR-101: swaps the target-system choice on the approval card in place (`chat.update`) --
     no DB write, no ApprovalDecision (research.md Decision 1). The Approve button's value is
-    the only place the choice is carried, so it's the only element besides the select itself
-    that needs rewriting. Preserves the Approve value's third (notion_flag) segment untouched
+    the only place the choice is carried; the proposed-actions text is then re-derived from it.
+    Preserves the Approve value's third (notion_flag) segment untouched
     (research.md Decision 1, 003-flowpilot-notion-integration)."""
     await ack()
     target_system = action["selected_option"]["value"]
@@ -61,6 +83,7 @@ async def handle_select_target_system(ack: Any, body: dict, action: dict, respon
                 proposal_id, _old_target_system, notion_flag = element["value"].split("|", 2)
                 element["value"] = f"{proposal_id}|{target_system}|{notion_flag}"
 
+    refresh_proposed_actions(blocks)
     await respond(blocks=blocks, replace_original=True)
 
 
@@ -85,6 +108,7 @@ async def handle_select_notion_brief(ack: Any, body: dict, action: dict, respond
                 proposal_id, target_system, _old_notion_flag = element["value"].split("|", 2)
                 element["value"] = f"{proposal_id}|{target_system}|{notion_flag}"
 
+    refresh_proposed_actions(blocks)
     await respond(blocks=blocks, replace_original=True)
 
 
@@ -99,6 +123,9 @@ async def handle_approve(ack: Any, body: dict, action: dict, respond: Any, say: 
         # persist the approval decision (Constitution X), then perform the idempotent writes
         try:
             proposal = await approve_plan(session=session, proposal_id=proposal_id, user_id=user_id)
+        except NotAuthorizedError as exc:
+            await _notify_not_allowed(respond, exc, "approve")
+            return
         except DecisionLockedError as exc:
             await _notify_already_decided(respond, exc, "approve")
             return
@@ -145,6 +172,9 @@ async def handle_reject(ack: Any, body: dict, action: dict, respond: Any) -> Non
     async with async_session_factory() as session:
         try:
             await reject_plan(session=session, proposal_id=proposal_id, user_id=user_id)
+        except NotAuthorizedError as exc:
+            await _notify_not_allowed(respond, exc, "reject")
+            return
         except DecisionLockedError as exc:
             await _notify_already_decided(respond, exc, "reject")
             return
@@ -162,15 +192,25 @@ async def handle_edit(ack: Any, body: dict, action: dict, respond: Any, say: Any
     async with async_session_factory() as session:
         try:
             proposal = await request_edit(session=session, proposal_id=proposal_id, user_id=user_id)
+        except NotAuthorizedError as exc:
+            await _notify_not_allowed(respond, exc, "edit")
+            return
         except DecisionLockedError as exc:
             await _notify_already_decided(respond, exc, "edit")
             return
         channel_id = proposal.slack_channel_id
         thread_ts = proposal.slack_thread_ts
         objective = proposal.objective
+        # keep the original requester as owner of the regenerated plan
+        requester_id = proposal.requested_by_user_id
 
     # FR-011: regenerate from the thread context -> a fresh pending_approval proposal + new card.
     # ponytail: the button carries no free text, so we replan the original objective over the current
     # thread (which now holds the user's requested-changes reply). A structured edit form is post-MVP.
-    event = {"text": objective, "channel": channel_id, "thread_ts": thread_ts, "user": user_id}
+    event = {
+        "text": objective,
+        "channel": channel_id,
+        "thread_ts": thread_ts,
+        "user": requester_id,
+    }
     await create_plan(event=event, say=say)

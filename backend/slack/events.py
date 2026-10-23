@@ -1,4 +1,5 @@
 """Slack event handling: classify project-execution requests and route them (FR-001, FR-002)."""
+
 from typing import Any
 
 from slack.app import bolt_app
@@ -49,5 +50,9 @@ async def handle_app_mention(event: dict, say: Any) -> None:
 async def handle_message(event: dict, say: Any) -> None:
     # ignore bot echoes and message subtypes (edits, joins, etc.)
     if event.get("subtype") or event.get("bot_id"):
+        return
+    # NFR-001: channel @mentions also arrive as app_mention; handling them here too would create
+    # a second plan + card. Only DMs and Assistant threads (both channel_type "im") route here.
+    if event.get("channel_type") != "im":
         return
     await _route(event, say)
