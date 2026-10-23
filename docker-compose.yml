@@ -1,0 +1,40 @@
+# Local development only — not a production deployment (005 spec non-goal).
+#   docker compose up --build      # Postgres + backend (migrations run on backend start)
+#   docker compose up db           # Postgres only, for `uv run uvicorn app.main:app --reload` on the host
+#                                  # with DATABASE_URL=postgresql+asyncpg://flowpilot:postgres@localhost:5432/flowpilot
+# Ports bind to 127.0.0.1 so the dev database is never exposed beyond this machine.
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: flowpilot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: flowpilot
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flowpilot -d flowpilot"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  backend:
+    build:
+      context: backend
+      dockerfile: Dockerfile
+    # Slack/Anthropic/GitHub credentials come from backend/.env; DATABASE_URL below overrides it.
+    env_file:
+      - path: backend/.env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://flowpilot:${POSTGRES_PASSWORD:-postgres}@db:5432/flowpilot
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

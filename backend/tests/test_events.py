@@ -12,21 +12,74 @@ Interface imposed on T024:
 import pytest
 
 
-def test_non_project_message_is_not_a_request():
+@pytest.mark.parametrize(
+    "text",
+    [
+        "hey, does anyone want to grab lunch?",
+        "lunch launch party pics",
+        "<@UBOT> lunch launch party pics",
+        "the launch went great, congrats team!",
+        "what's the plan for lunch?",
+        "did you see the execution of that play",
+        "can someone launch the build?",
+        "release party pics from the launch",
+    ],
+)
+def test_non_project_message_is_not_a_request(text):
     from slack.events import classify_message
 
-    assert classify_message("hey, does anyone want to grab lunch?") is False
+    assert classify_message(text) is False
 
 
-def test_project_execution_request_is_classified():
+@pytest.mark.parametrize(
+    "text",
+    [
+        "create an execution plan for the onboarding launch in four weeks",
+        "<@UBOT> create an execution plan for our onboarding redesign launch.",
+        "<@UBOT> launch our customer onboarding redesign in four weeks.",
+        "Plan the API migration and create the task breakdown.",
+        "Create a project plan from this thread.",
+        "Create GitHub issues from this approved plan.",
+        "please plan the onboarding launch",
+        "we need a launch plan for billing v2",
+    ],
+)
+def test_project_execution_request_is_classified(text):
     from slack.events import classify_message
 
-    assert (
-        classify_message(
-            "create an execution plan for the onboarding launch in four weeks"
-        )
-        is True
-    )
+    assert classify_message(text) is True
+
+
+def test_suggested_prompts_are_themselves_project_requests():
+    # FR-014 prompts offered in the FR-002 clarification must pass the gate they advertise.
+    from slack.events import _SUGGESTED_PROMPTS, classify_message
+
+    assert _SUGGESTED_PROMPTS
+    assert all(classify_message(f"<@UBOT> {p}") for p in _SUGGESTED_PROMPTS)
+
+
+@pytest.mark.asyncio
+async def test_non_project_mention_gets_clarification_and_no_plan(monkeypatch):
+    from slack.events import _SUGGESTED_PROMPTS, handle_app_mention
+
+    calls = _count_plans(monkeypatch)
+    said: list[dict] = []
+
+    async def say(**kwargs: object) -> None:
+        said.append(kwargs)
+
+    event = {
+        "type": "app_mention",
+        "text": "<@UBOT> lunch launch party pics",
+        "user": "U1",
+        "channel": "C1",
+        "ts": "1.2",
+    }
+    await handle_app_mention(event=event, say=say)
+
+    assert calls == []
+    assert len(said) == 1
+    assert all(p in str(said[0]["text"]) for p in _SUGGESTED_PROMPTS)
 
 
 # NFR-001: one Slack message must produce exactly one plan, regardless of how many event types

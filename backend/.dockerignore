@@ -1,0 +1,14 @@
+# Build context = runtime inputs only. alembic.ini and db/migrations must stay IN the context
+# (the entrypoint runs `alembic upgrade head`); .env must never reach an image layer.
+.venv/
+**/__pycache__/
+**/*.py[co]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+.git/
+.claude/
+.env
+.env.*
+tests/

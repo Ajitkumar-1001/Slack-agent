@@ -1,0 +1,47 @@
+# FlowPilot Slack app manifest. Create the app with api.slack.com/apps -> Create New App ->
+# From a manifest, then follow docs/runbook.md.
+#
+# Derived from the code, not the design docs:
+#   - events: backend/slack/events.py handles only `app_mention` and `message` with
+#     channel_type "im" (DMs). There is no `assistant_thread_started` handler, so no Assistant
+#     events are subscribed (Bolt would answer them as unhandled requests).
+#   - URLs: backend/app/routes/slack.py serves POST /slack/events and POST /slack/actions.
+#     Replace YOUR-HOST with your public HTTPS host (e.g. the ngrok domain).
+display_information:
+  name: FlowPilot
+  description: Turns a Slack request into an approved execution plan and GitHub issues.
+  background_color: "#1d3557"
+features:
+  app_home:
+    home_tab_enabled: false
+    # required for the DM entry point (message.im) — users can't DM the bot without it
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  bot_user:
+    display_name: FlowPilot
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read # app_mention event
+      - chat:write # say(): ack, progress, approval card, stakeholder summary
+      - im:history # message.im event (DMs)
+      # Real-time Search (tools/slack_rts.py, only when SLACK_RTS_ENABLED=true). Scope names are
+      # NOT verified against a live workspace; check Slack's assistant.search.context docs before
+      # uncommenting, because one wrong scope name makes Slack reject the whole manifest.
+      # - search:read.public
+      # - search:read.private
+      # - search:read.im
+      # - search:read.mpim
+settings:
+  event_subscriptions:
+    request_url: https://YOUR-HOST/slack/events
+    bot_events:
+      - app_mention
+      - message.im
+  interactivity:
+    is_enabled: true
+    request_url: https://YOUR-HOST/slack/actions
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
