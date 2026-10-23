@@ -43,7 +43,7 @@ async def test_approve_records_decision_and_transitions_to_approved(db_session, 
 
     proposal = await _make_proposal(db_session, ProposalStatus.PENDING_APPROVAL, valid_plan_dict)
 
-    await approve_plan(session=db_session, proposal_id=str(proposal.id), user_id="U2")
+    await approve_plan(session=db_session, proposal_id=str(proposal.id), user_id="U1")
 
     refreshed = await db_session.get(type(proposal), proposal.id)
     assert refreshed.status == ProposalStatus.APPROVED
@@ -435,7 +435,7 @@ async def test_reject_identical_regardless_of_drive_tagged_evidence_summary(db_s
 
     proposal = await _make_proposal(db_session, ProposalStatus.PENDING_APPROVAL, drive_grounded_plan)
 
-    await reject_plan(session=db_session, proposal_id=str(proposal.id), user_id="U2")
+    await reject_plan(session=db_session, proposal_id=str(proposal.id), user_id="U1")
 
     refreshed = await db_session.get(type(proposal), proposal.id)
     assert refreshed.status == ProposalStatus.REJECTED
@@ -452,7 +452,7 @@ async def test_approve_unknown_proposal_raises(db_session):
     from workflows.approve_plan import approve_plan
 
     with pytest.raises(Exception):
-        await approve_plan(session=db_session, proposal_id=str(uuid.uuid4()), user_id="U2")
+        await approve_plan(session=db_session, proposal_id=str(uuid.uuid4()), user_id="U1")
 
 
 # ---------------------------------------------------------------------------
@@ -471,7 +471,7 @@ async def test_reject_records_decision_and_creates_no_artifacts(db_session, vali
 
     proposal = await _make_proposal(db_session, ProposalStatus.PENDING_APPROVAL, valid_plan_dict)
 
-    await reject_plan(session=db_session, proposal_id=str(proposal.id), user_id="U2")
+    await reject_plan(session=db_session, proposal_id=str(proposal.id), user_id="U1")
 
     refreshed = await db_session.get(type(proposal), proposal.id)
     assert refreshed.status == ProposalStatus.REJECTED
@@ -498,7 +498,7 @@ async def test_reject_creates_no_notion_artifacts_even_if_toggle_was_enabled(db_
 
     proposal = await _make_proposal(db_session, ProposalStatus.PENDING_APPROVAL, valid_plan_dict)
 
-    await reject_plan(session=db_session, proposal_id=str(proposal.id), user_id="U2")
+    await reject_plan(session=db_session, proposal_id=str(proposal.id), user_id="U1")
 
     refreshed = await db_session.get(type(proposal), proposal.id)
     assert refreshed.status == ProposalStatus.REJECTED
@@ -521,7 +521,7 @@ async def test_edit_supersedes_and_creates_no_artifacts(db_session, valid_plan_d
 
     proposal = await _make_proposal(db_session, ProposalStatus.PENDING_APPROVAL, valid_plan_dict)
 
-    await request_edit(session=db_session, proposal_id=str(proposal.id), user_id="U2")
+    await request_edit(session=db_session, proposal_id=str(proposal.id), user_id="U1")
 
     refreshed = await db_session.get(type(proposal), proposal.id)
     assert refreshed.status == ProposalStatus.EDIT_REQUESTED
@@ -559,9 +559,182 @@ async def test_decision_lock_ignores_later_actions(db_session, valid_plan_dict, 
 
     for action in (approve_plan, reject_plan, request_edit):
         with pytest.raises(DecisionLockedError) as excinfo:
-            await action(session=db_session, proposal_id=pid, user_id="U2")
+            await action(session=db_session, proposal_id=pid, user_id="U1")
         assert excinfo.value.proposal.status == status  # notice can report the current status
 
     refreshed = await db_session.get(type(proposal), proposal.id)
     assert refreshed.status == status  # unchanged
     assert (await db_session.execute(select(ApprovalDecision))).scalars().all() == []
+
+
+# ---------------------------------------------------------------------------
+# Approver authorization: only the requester or an allowlisted approver may decide.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_id", ["U9", ""])
+async def test_non_requester_cannot_decide_and_nothing_changes(
+    monkeypatch, db_session, valid_plan_dict, user_id
+):
+    from app.config import Settings, settings
+    from db.models import ActionLog, ApprovalDecision, ProposalStatus
+    from sqlalchemy import select
+    from workflows.approve_plan import (
+        NotAuthorizedError,
+        approve_plan,
+        reject_plan,
+        request_edit,
+    )
+
+    # requester-only unless FLOWPILOT_APPROVER_IDS is set
+    assert Settings.model_fields["flowpilot_approver_ids"].default == ""
+    monkeypatch.setattr(settings, "flowpilot_approver_ids", "")
+    proposal = await _make_proposal(
+        db_session, ProposalStatus.PENDING_APPROVAL, valid_plan_dict
+    )
+    pid = str(proposal.id)
+
+    for action in (approve_plan, reject_plan, request_edit):
+        with pytest.raises(NotAuthorizedError):
+            await action(session=db_session, proposal_id=pid, user_id=user_id)
+
+    refreshed = await db_session.get(type(proposal), proposal.id)
+    assert refreshed.status == ProposalStatus.PENDING_APPROVAL
+    assert (await db_session.execute(select(ApprovalDecision))).scalars().all() == []
+    assert (await db_session.execute(select(ActionLog))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_allowlisted_approver_can_decide(monkeypatch, db_session, valid_plan_dict):
+    from app.config import settings
+    from db.models import ApprovalDecision, ProposalStatus
+    from sqlalchemy import select
+    from workflows.approve_plan import approve_plan
+
+    monkeypatch.setattr(settings, "flowpilot_approver_ids", " U7 , U8,")
+    proposal = await _make_proposal(
+        db_session, ProposalStatus.PENDING_APPROVAL, valid_plan_dict
+    )
+
+    await approve_plan(session=db_session, proposal_id=str(proposal.id), user_id="U8")
+
+    assert proposal.status == ProposalStatus.APPROVED
+    decisions = (await db_session.execute(select(ApprovalDecision))).scalars().all()
+    assert [d.decided_by_user_id for d in decisions] == ["U8"]
+
+
+def _patch_action_session(monkeypatch, db_session):
+    """Point slack.actions at the in-memory test session, not the real Postgres one."""
+    from contextlib import asynccontextmanager
+
+    import slack.actions as actions
+
+    @asynccontextmanager
+    async def session_factory():
+        yield db_session
+
+    monkeypatch.setattr(actions, "async_session_factory", session_factory)
+    return actions
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "handler_name", ["handle_approve", "handle_reject", "handle_edit"]
+)
+async def test_unauthorized_click_gets_ephemeral_refusal_and_writes_nothing(
+    monkeypatch, db_session, valid_plan_dict, handler_name
+):
+    from app.config import settings
+    from db.models import ActionLog, ApprovalDecision, ExternalArtifact, ProposalStatus
+    from sqlalchemy import select
+    from structlog.testing import capture_logs
+
+    monkeypatch.setattr(settings, "flowpilot_approver_ids", "")
+    actions = _patch_action_session(monkeypatch, db_session)
+
+    async def must_not_run(**_kwargs):
+        raise AssertionError("an unauthorized click must not execute or replan")
+
+    monkeypatch.setattr(actions, "execute_plan", must_not_run)
+    monkeypatch.setattr(actions, "create_plan", must_not_run)
+
+    proposal = await _make_proposal(
+        db_session, ProposalStatus.PENDING_APPROVAL, valid_plan_dict
+    )
+    pid = str(proposal.id)
+    value = f"{pid}|github|false" if handler_name == "handle_approve" else pid
+    responded: list = []
+    said: list = []
+
+    async def ack():
+        pass
+
+    async def respond(**kwargs):
+        responded.append(kwargs)
+
+    async def say(**kwargs):
+        said.append(kwargs)
+
+    kwargs = {
+        "ack": ack,
+        "body": {"user": {"id": "U9"}},
+        "action": {"value": value},
+        "respond": respond,
+    }
+    if handler_name != "handle_reject":
+        kwargs["say"] = say
+
+    with capture_logs() as logs:
+        await getattr(actions, handler_name)(**kwargs)
+
+    assert len(responded) == 1
+    assert responded[0]["response_type"] == "ephemeral"
+    assert "not allowed" in responded[0]["text"]
+    assert said == []
+
+    audit = [e for e in logs if e["event"] == "decision_unauthorized"]
+    assert audit and audit[0]["user_id"] == "U9" and audit[0]["proposal_id"] == pid
+
+    refreshed = await db_session.get(type(proposal), proposal.id)
+    assert refreshed.status == ProposalStatus.PENDING_APPROVAL
+    for model in (ApprovalDecision, ActionLog, ExternalArtifact):
+        assert (await db_session.execute(select(model))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_edit_by_approver_keeps_original_requester_on_regenerated_plan(
+    monkeypatch, db_session, valid_plan_dict
+):
+    from app.config import settings
+    from db.models import ProposalStatus
+
+    monkeypatch.setattr(settings, "flowpilot_approver_ids", "U7")
+    actions = _patch_action_session(monkeypatch, db_session)
+    captured: dict = {}
+
+    async def fake_create_plan(*, event, say):
+        captured["event"] = event
+
+    monkeypatch.setattr(actions, "create_plan", fake_create_plan)
+
+    proposal = await _make_proposal(
+        db_session, ProposalStatus.PENDING_APPROVAL, valid_plan_dict
+    )
+
+    async def noop(**_kwargs):
+        pass
+
+    async def ack():
+        pass
+
+    await actions.handle_edit(
+        ack=ack,
+        body={"user": {"id": "U7"}},
+        action={"value": str(proposal.id)},
+        respond=noop,
+        say=noop,
+    )
+
+    assert proposal.status == ProposalStatus.EDIT_REQUESTED
+    assert captured["event"]["user"] == "U1"  # not the approver who clicked Edit

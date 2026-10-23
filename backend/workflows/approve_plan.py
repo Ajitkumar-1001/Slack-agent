@@ -7,17 +7,30 @@ pending_approval, ``claim_pending_proposal`` makes every further Approve/Edit/Re
 (``DecisionLockedError``) — the first decision wins (FR-021). An ignored action creates no
 external artifact and no new audit row; the Slack layer surfaces an ephemeral "already decided"
 notice and logs it (structured logging only).
+
+Only the proposal's requester, or a user in ``settings.flowpilot_approver_ids``, may decide;
+anyone else gets ``NotAuthorizedError`` before any state changes.
 """
 import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from db.models import ApprovalDecision, ApprovalDecisionType, ProjectProposal, ProposalStatus
 from db.repository import ApprovalDecisionRepository
 
 
 class ProposalNotFoundError(Exception):
     pass
+
+
+class NotAuthorizedError(Exception):
+    """Clicker is neither the proposal's requester nor an allowlisted approver."""
+
+    def __init__(self, proposal_id: str, user_id: str) -> None:
+        self.proposal_id = proposal_id
+        self.user_id = user_id
+        super().__init__(f"user {user_id!r} may not decide proposal {proposal_id}")
 
 
 class DecisionLockedError(Exception):
@@ -30,16 +43,23 @@ class DecisionLockedError(Exception):
         super().__init__(f"proposal {proposal.id} already decided (status={proposal.status.value})")
 
 
-async def claim_pending_proposal(*, session: AsyncSession, proposal_id: str) -> ProjectProposal:
+async def claim_pending_proposal(
+    *, session: AsyncSession, proposal_id: str, user_id: str
+) -> ProjectProposal:
     """Atomically claim a still-pending proposal for a decision — the shared decision-lock guard (T039).
 
     Locks the row (``FOR UPDATE`` where the backend supports it; a no-op on SQLite, which serializes
     writes anyway) so two near-simultaneous clicks resolve first-writer-wins. Raises
+    ``NotAuthorizedError`` first if ``user_id`` may not decide this proposal, then
     ``DecisionLockedError`` if the proposal has already left ``pending_approval`` — the later
     Approve/Edit/Reject is ignored, including while the proposal is executing (FR-021)."""
     proposal = await session.get(ProjectProposal, uuid.UUID(proposal_id), with_for_update=True)
     if proposal is None:
         raise ProposalNotFoundError(proposal_id)
+    approvers = {uid.strip() for uid in settings.flowpilot_approver_ids.split(",")}
+    allowed = ({proposal.requested_by_user_id} | approvers) - {""}
+    if user_id not in allowed:
+        raise NotAuthorizedError(proposal_id, user_id)
     if proposal.status != ProposalStatus.PENDING_APPROVAL:
         raise DecisionLockedError(proposal)
     return proposal
@@ -72,7 +92,9 @@ async def _record_decision(
 async def approve_plan(*, session: AsyncSession, proposal_id: str, user_id: str) -> ProjectProposal:
     """FR-010: record an ApprovalDecision(approved) before any external write, then transition to
     approved. execute_plan performs the writes only after this decision is persisted."""
-    proposal = await claim_pending_proposal(session=session, proposal_id=proposal_id)
+    proposal = await claim_pending_proposal(
+        session=session, proposal_id=proposal_id, user_id=user_id
+    )
     return await _record_decision(
         session=session,
         proposal=proposal,
@@ -84,7 +106,9 @@ async def approve_plan(*, session: AsyncSession, proposal_id: str, user_id: str)
 
 async def reject_plan(*, session: AsyncSession, proposal_id: str, user_id: str) -> ProjectProposal:
     """FR-012: record the rejection, transition to proposal_rejected, create zero external artifacts."""
-    proposal = await claim_pending_proposal(session=session, proposal_id=proposal_id)
+    proposal = await claim_pending_proposal(
+        session=session, proposal_id=proposal_id, user_id=user_id
+    )
     return await _record_decision(
         session=session,
         proposal=proposal,
@@ -101,7 +125,9 @@ async def request_edit(
 
     The regenerated plan is produced as a fresh pending_approval proposal by create_plan; this one
     is now terminal for execution and creates no external artifacts of its own."""
-    proposal = await claim_pending_proposal(session=session, proposal_id=proposal_id)
+    proposal = await claim_pending_proposal(
+        session=session, proposal_id=proposal_id, user_id=user_id
+    )
     return await _record_decision(
         session=session,
         proposal=proposal,
