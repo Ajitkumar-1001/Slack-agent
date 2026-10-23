@@ -13,6 +13,7 @@ from google.oauth2 import service_account
 from pydantic import BaseModel
 
 from app.config import settings
+from tools.retry import send_with_retry
 
 log = structlog.get_logger()
 
@@ -84,10 +85,13 @@ async def _search_files(*, query: str, folder_scope: str | None, token: str) -> 
     if folder_scope:
         q += f" and '{folder_scope}' in parents"
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        response = await client.get(
-            _DRIVE_FILES_URL,
-            params={"q": q, "pageSize": _PAGE_SIZE},
-            headers={"Authorization": f"Bearer {token}"},
+        response = await send_with_retry(
+            lambda: client.get(
+                _DRIVE_FILES_URL,
+                params={"q": q, "pageSize": _PAGE_SIZE},
+                headers={"Authorization": f"Bearer {token}"},
+            ),
+            retry_5xx=True,
         )
         response.raise_for_status()
         files: list[dict] = response.json().get("files", [])
@@ -97,10 +101,13 @@ async def _search_files(*, query: str, folder_scope: str | None, token: str) -> 
 async def _export_file(*, file_id: str, mime_type: str, token: str) -> str:
     export_mime_type = _EXPORT_MIME_TYPES.get(mime_type, "text/plain")
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        response = await client.get(
-            f"{_DRIVE_FILES_URL}/{file_id}/export",
-            params={"mimeType": export_mime_type},
-            headers={"Authorization": f"Bearer {token}"},
+        response = await send_with_retry(
+            lambda: client.get(
+                f"{_DRIVE_FILES_URL}/{file_id}/export",
+                params={"mimeType": export_mime_type},
+                headers={"Authorization": f"Bearer {token}"},
+            ),
+            retry_5xx=True,
         )
         response.raise_for_status()
         return response.text
