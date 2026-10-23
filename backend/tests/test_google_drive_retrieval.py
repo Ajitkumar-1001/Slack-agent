@@ -149,6 +149,8 @@ async def test_returns_unavailable_when_a_call_exceeds_the_timeout(monkeypatch):
 
 
 class _FakeResponse:
+    status_code = 200  # read by tools.retry.send_with_retry
+
     def __init__(self, json_body):
         self._json = json_body
 

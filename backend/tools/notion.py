@@ -10,6 +10,7 @@ titles only).
 from app.config import settings
 from db.models import ActionLogStatus
 from tools.github import IssueOutcome, RemoteCreate, RemoteLookup
+from tools.retry import send_with_retry
 
 import httpx
 
@@ -134,7 +135,14 @@ def _headers() -> dict:
 async def notion_create_page(payload: dict) -> tuple[str, str]:
     """Real Notion REST create — POST /v1/pages."""
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(f"{_NOTION_API}/pages", headers=_headers(), json=payload)
+        # ponytail: no 5xx resend — same reason as github_create_issue (no request idempotency key,
+        # index-lagged search); a 5xx'd create is recorded FAILED and reconciled on re-run instead.
+        resp = await send_with_retry(
+            lambda: client.post(
+                f"{_NOTION_API}/pages", headers=_headers(), json=payload
+            ),
+            retry_5xx=False,
+        )
         resp.raise_for_status()
         data = resp.json()
         return data["id"], data["url"]
@@ -144,10 +152,17 @@ async def notion_find_page(idempotency_key: str) -> tuple[str, str] | None:
     """Real Notion REST reconciliation — POST /v1/search, filtered client-side for a page whose
     title contains the exact idempotency marker (research.md Decision 2)."""
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{_NOTION_API}/search",
-            headers=_headers(),
-            json={"query": idempotency_key, "filter": {"property": "object", "value": "page"}},
+        # Read-only despite POST, so 5xx is safe to resend.
+        resp = await send_with_retry(
+            lambda: client.post(
+                f"{_NOTION_API}/search",
+                headers=_headers(),
+                json={
+                    "query": idempotency_key,
+                    "filter": {"property": "object", "value": "page"},
+                },
+            ),
+            retry_5xx=True,
         )
         resp.raise_for_status()
         for page in resp.json().get("results", []):

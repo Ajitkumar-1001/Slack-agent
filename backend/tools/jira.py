@@ -10,6 +10,7 @@ from agents.schemas import Task
 from app.config import settings
 from db.models import ActionLogStatus
 from tools.github import IssueOutcome, RemoteCreate, RemoteLookup
+from tools.retry import send_with_retry
 
 import httpx
 
@@ -74,11 +75,19 @@ def _auth() -> tuple[str, str]:
 async def jira_create_ticket(payload: dict) -> tuple[str, str]:
     """Real Jira Cloud REST v3 create — POST /rest/api/3/issue."""
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{settings.jira_base_url}/rest/api/3/issue",
-            auth=_auth(),
-            headers={"Accept": "application/json", "Content-Type": "application/json"},
-            json=payload,
+        # ponytail: no 5xx resend — same reason as github_create_issue (no request idempotency key,
+        # index-lagged JQL); a 5xx'd create is recorded FAILED and reconciled on re-run instead.
+        resp = await send_with_retry(
+            lambda: client.post(
+                f"{settings.jira_base_url}/rest/api/3/issue",
+                auth=_auth(),
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            ),
+            retry_5xx=False,
         )
         resp.raise_for_status()
         key = resp.json()["key"]
@@ -89,11 +98,14 @@ async def jira_find_ticket(idempotency_key: str) -> tuple[str, str] | None:
     """Real Jira Cloud REST v3 reconciliation lookup — JQL search for the marker label."""
     jql = f'project = "{settings.jira_project_key}" AND labels = "{_marker_label(idempotency_key)}"'
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            f"{settings.jira_base_url}/rest/api/3/search",
-            auth=_auth(),
-            headers={"Accept": "application/json"},
-            params={"jql": jql},
+        resp = await send_with_retry(
+            lambda: client.get(
+                f"{settings.jira_base_url}/rest/api/3/search",
+                auth=_auth(),
+                headers={"Accept": "application/json"},
+                params={"jql": jql},
+            ),
+            retry_5xx=True,
         )
         resp.raise_for_status()
         issues = resp.json().get("issues", [])

@@ -13,6 +13,7 @@ import httpx
 from agents.schemas import Task
 from app.config import settings
 from db.models import ActionLogStatus
+from tools.retry import send_with_retry
 
 _REQUIRED_LABELS = ["flowpilot", "approved", "ai-generated", "mvp"]
 _GITHUB_API = "https://api.github.com"
@@ -83,10 +84,15 @@ def _headers() -> dict:
 async def github_create_issue(payload: dict) -> tuple[str, str]:
     """Real GitHub REST create — POST /repos/{owner}/{repo}/issues."""
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            f"{_GITHUB_API}/repos/{settings.github_owner}/{settings.github_repo}/issues",
-            headers=_headers(),
-            json=payload,
+        # ponytail: no 5xx resend — GitHub has no request-level idempotency key and marker search
+        # is index-lagged, so a 5xx'd create is recorded FAILED and reconciled on re-run instead.
+        resp = await send_with_retry(
+            lambda: client.post(
+                f"{_GITHUB_API}/repos/{settings.github_owner}/{settings.github_repo}/issues",
+                headers=_headers(),
+                json=payload,
+            ),
+            retry_5xx=False,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -100,8 +106,11 @@ async def github_find_issue(idempotency_key: str) -> tuple[str, str] | None:
         f'in:body "flowpilot-key:{idempotency_key}"'
     )
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(
-            f"{_GITHUB_API}/search/issues", headers=_headers(), params={"q": query}
+        resp = await send_with_retry(
+            lambda: client.get(
+                f"{_GITHUB_API}/search/issues", headers=_headers(), params={"q": query}
+            ),
+            retry_5xx=True,
         )
         resp.raise_for_status()
         items = resp.json().get("items", [])
