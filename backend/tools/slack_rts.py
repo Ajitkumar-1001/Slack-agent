@@ -8,7 +8,6 @@ from typing import Literal
 
 import structlog
 from pydantic import BaseModel
-from slack_sdk.errors import SlackApiError
 
 from slack.app import bolt_app
 
@@ -92,11 +91,12 @@ async def retrieve_context(*, query: str, event: dict, mode: str) -> RetrievalRe
             # ADR-005: RTS unavailable -> ground only on the already-delivered event, never another
             # Slack query. Log type + Slack error code only: exception text can carry response
             # bodies, i.e. raw Slack content (IX).
-            response = exc.response if isinstance(exc, SlackApiError) else {}
+            # `.response` may be a raw aiohttp response (non-JSON body), so probe, don't assume.
+            data = getattr(getattr(exc, "response", None), "data", None)
             log.warning(
                 "slack_rts_unavailable",
                 error_type=type(exc).__name__,
-                slack_error=response.get("error"),
+                slack_error=data.get("error") if isinstance(data, dict) else None,
             )
             result = _event_payload(event)
 

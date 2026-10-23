@@ -158,6 +158,7 @@ async def test_rts_malformed_response_falls_back_to_event_payload(monkeypatch, d
     ("exc", "slack_error"),
     [
         ("slack_api_error", "missing_scope"),
+        ("non_json_body", None),  # slack_sdk passes the raw aiohttp response
         (ConnectionError("network down"), None),
     ],
 )
@@ -171,6 +172,8 @@ async def test_rts_call_failure_falls_back_to_event_payload(
     if exc == "slack_api_error":
         body = {"ok": False, "error": "missing_scope", "detail": _SECRET}
         exc = SlackApiError("failed", _slack_response(body))
+    elif exc == "non_json_body":
+        exc = SlackApiError("Received a response in a non-JSON format", object())
     monkeypatch.setattr(rts, "bolt_app", _fake_bolt(exc=exc))
     event = {"text": "plan it"}
     with capture_logs() as logs:
