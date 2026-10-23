@@ -362,3 +362,77 @@ async def test_drive_enabled_but_adapter_fails_create_plan_still_completes(
     await cp.create_plan(event={"text": "x", "channel": "C1", "ts": "1.2"}, say=fake_say)
 
     assert isinstance(posted[-1], list)  # the approval card still rendered despite the Drive failure
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rts_enabled", "rts_outcome", "expected_context", "expected_mode"),
+    [
+        # default OFF: RTS never called
+        (False, None, ["[slack] plan the launch"], "event_payload"),
+        (True, "ok", ["[slack] We committed to a Q3 launch."], "rts"),
+        # RTS down -> event-payload fallback
+        (True, "error", ["[slack] plan the launch"], "event_payload"),
+    ],
+)
+async def test_create_plan_slack_rts_flag_and_fallback(
+    monkeypatch,
+    valid_plan_dict,
+    rts_enabled,
+    rts_outcome,
+    expected_context,
+    expected_mode,
+):
+    """FR-003 / ADR-005: live RTS only behind ``settings.slack_rts_enabled`` (default OFF); any
+    RTS failure falls back to the event payload; RTS context reaches the planner, never the DB."""
+    import tools.slack_rts as rts
+    import workflows.create_plan as cp
+    from agents.schemas import ProjectPlan
+    from app.config import Settings, settings
+    from structlog.testing import capture_logs
+
+    assert Settings.model_fields["slack_rts_enabled"].default is False
+    monkeypatch.setattr(settings, "slack_rts_enabled", rts_enabled)
+    monkeypatch.setattr(settings, "default_google_drive_enabled", False)
+
+    rts_text = "We committed to a Q3 launch."
+    # counted, not raised: the adapter's fallback would swallow an AssertionError
+    rts_calls: list = []
+
+    async def fake_rts_search(*, query, event):
+        rts_calls.append(query)
+        if rts_outcome == "error":
+            raise ConnectionError("RTS unavailable")
+        return [rts_text]
+
+    captured: dict = {}
+
+    async def fake_generate(*, query, context):
+        captured["context"] = context
+        return ProjectPlan(**valid_plan_dict)
+
+    class _Proposal:
+        id = "prop-xyz"
+
+    async def fake_persist(event, plan):
+        captured["persisted"] = repr((event, plan))
+        return _Proposal()
+
+    async def fake_say(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(rts, "_rts_search", fake_rts_search)
+    monkeypatch.setattr(cp, "generate_plan", fake_generate)
+    monkeypatch.setattr(cp, "persist_proposal", fake_persist)
+
+    with capture_logs() as logs:
+        await cp.create_plan(
+            event={"text": "plan the launch", "channel": "C1", "ts": "1.2"},
+            say=fake_say,
+        )
+
+    assert len(rts_calls) == (1 if rts_enabled else 0)
+    assert captured["context"] == expected_context
+    assert rts_text not in captured["persisted"]
+    created = [e for e in logs if e["event"] == "proposal_created"]
+    assert created[0]["retrieval_mode"] == expected_mode

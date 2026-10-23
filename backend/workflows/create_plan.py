@@ -21,10 +21,6 @@ from tools.slack_rts import retrieve_context
 
 log = structlog.get_logger()
 
-# ponytail: default to the ADR-005 event-payload fallback until live RTS is wired
-# (tools.slack_rts._rts_search); swap to "rts" once a workspace with RTS is available.
-_DEFAULT_RETRIEVAL_MODE = "event_payload"
-
 Say = Callable[..., Awaitable[Any]]
 
 _PLAN_FAILED_REPLY = (
@@ -58,7 +54,8 @@ async def create_plan(*, event: dict, say: Say) -> None:
     query = event.get("text", "")
 
     await say(text="Searching relevant Slack context…")
-    slack_context = await retrieve_context(query=query, event=event, mode=_DEFAULT_RETRIEVAL_MODE)
+    mode = "rts" if settings.slack_rts_enabled else "event_payload"
+    slack_context = await retrieve_context(query=query, event=event, mode=mode)
 
     drive_documents: list[str] = []
     drive_retrieval_mode = "disabled"
