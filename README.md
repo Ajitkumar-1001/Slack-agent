@@ -1,669 +1,245 @@
-# FlowPilot AI- Slack integration
+# FlowPilot AI
 
-### Slack-Native Project Execution Copilot
-
-> Turn messy Slack discussions into approved execution plans, tracked tasks, risk alerts, and stakeholder updates.
-
-FlowPilot AI is a Slack-native AI agent that helps teams move from discussion to execution without leaving Slack. It reads project context from Slack using permission-aware Real-Time Search, drafts an execution plan, asks for human approval, creates GitHub issues through a typed tool adapter, and keeps stakeholders updated as work progresses.
+**A Slack-native project execution copilot.** You describe a project in Slack. FlowPilot drafts a
+structured execution plan and posts it as an approval card. Once a human approves, it creates the
+tasks in GitHub and/or Jira, writes an audit trail, and posts a summary back to the thread.
 
 Built for the **Slack Agent Builder Challenge 2026**.
 
----
-
-## Why FlowPilot AI?
-
-Teams do not usually fail because they lack ideas. They slow down because execution context is scattered.
-
-A single project request like:
-
 ```text
-Launch the new customer onboarding redesign in four weeks.
+Slack request → grounded ProjectPlan → Block Kit approval card → human decision
+             → GitHub issues / Jira tickets (+ optional Notion brief) → audit log → Slack summary
 ```
 
-quickly becomes fragmented across:
+FlowPilot is not a chatbot, a dashboard, or an autonomous agent. Nothing is written to an external
+system until a person clicks **Approve**.
 
-* Slack threads
-* Jira tickets
-* GitHub issues
-* Notion docs
-* Google Drive files
-* Status meetings
-* Stakeholder messages
-
-FlowPilot AI turns that scattered context into a structured execution workflow inside Slack.
+> **Status:** the code paths below are implemented and covered by automated tests, but the
+> **live end-to-end demo in a real Slack workspace has not been run yet**. Every external API in
+> the test suite is faked. The step-by-step script for that first live run is
+> [`docs/runbook.md`](docs/runbook.md).
 
 ---
 
-## What FlowPilot Does
+## Feature status
 
-FlowPilot is not a generic chatbot.
+| Area | Status | What the code does |
+|---|---|---|
+| Slack entry points | Implemented | `@FlowPilot` mentions in channels and direct messages. Messages that don't look like a planning request get a short reply with example prompts. The Slack Assistant panel is **not** supported (no handler). |
+| Planning | Implemented | One Claude call with structured output, validated against the `ProjectPlan` Pydantic model (milestones, tasks, risks, dependencies). On validation failure it retries once, then fails safely and saves nothing. |
+| Approval card | Implemented | Block Kit card with objective, timeline, counts, the top 3 risks by severity, a GitHub / Jira / Both selector, an optional Notion checkbox, and **Approve / Edit Plan / Reject**. Only the requester or a user in `FLOWPILOT_APPROVER_IDS` can decide, and the first decision wins. |
+| GitHub issues | Implemented | One issue per task, idempotent and audited. This is the default target. |
+| Jira tickets | Implemented (optional) | Same per-task, idempotent flow. Selected on the card (`Jira` or `Both`). Needs the `JIRA_*` settings. |
+| Notion project brief | Implemented (optional) | One brief page per approved plan, linking the created issues/tickets. The checkbox only appears when `NOTION_API_KEY` is set. A Notion failure never affects the GitHub/Jira results. |
+| Google Drive context | Implemented (optional, **read-only**) | Searches native Docs/Sheets/Slides with a service account (`drive.readonly` scope, max 5 files, 10 s timeout) and adds them to the planner's context. Nothing from Drive is stored. If Drive fails, planning carries on with Slack context only. |
+| Slack context retrieval | Implemented, **off by default** | With `SLACK_RTS_ENABLED=false` (the default) the plan is grounded on the triggering message only. Turning it on calls Slack Real-Time Search (`assistant.search.context`). That path has not been checked against a live RTS-enabled workspace, and it falls back to the triggering message on any error. |
+| Risk & stakeholder summary | Implemented, as **one** message | Risks are part of the generated plan, not a separate monitoring service. After execution FlowPilot posts a single summary: created items per system with links, any failed tasks, the Notion brief result, open risks (title + severity), and next steps. There is no progress tracking, recurring report, or risk re-scan after that message. |
+| Edit Plan | Implemented (simple) | Re-plans the original objective in the same thread and posts a fresh card. There is no structured edit form. |
+| Audit trail | Implemented | Proposals, approval decisions, per-action logs (with idempotency keys) and created artifacts live in Postgres. |
+| Health check | Implemented | `GET /health` → `{"status": "ok", "db": "ok" \| "unreachable"}`, always HTTP 200. |
+| Docker | Implemented | Backend image plus a local-dev `docker-compose.yml` with Postgres. |
+| CI / pre-commit hooks | Not set up | No CI workflow or pre-commit config is committed yet. Run the checks below by hand. |
 
-It is a project execution agent that follows a safe, human-in-the-loop workflow:
+### Safety guarantees (enforced in code, covered by tests)
 
-```text
-Slack request
-   ↓
-Retrieve relevant Slack context
-   ↓
-Generate execution plan
-   ↓
-Show approval card
-   ↓
-Create GitHub issues (approved actions)
-   ↓
-Track progress and risks
-   ↓
-Post stakeholder updates
-```
-
----
-
-## Core Demo Workflow
-
-### User request
-
-```text
-@FlowPilot launch our customer onboarding redesign in four weeks.
-```
-
-### FlowPilot retrieves context
-
-FlowPilot searches relevant Slack conversations and files using Slack Real-Time Search.
-
-It finds:
-
-* Previous onboarding discussions
-* Existing project decisions
-* Open risks
-* Mentioned stakeholders
-* Related implementation notes
-
-### FlowPilot proposes a plan
-
-FlowPilot generates:
-
-* Milestones
-* Deliverables
-* Task breakdown
-* Owners
-* Dependencies
-* Risks
-* Suggested timeline
-
-### Human approval
-
-Before making external changes, FlowPilot shows an approval card in Slack:
-
-```text
-Proposed Execution Plan
-
-Milestones: 4
-Tasks: 11
-Open Risks: 3
-External Actions: Create GitHub issues
-
-[Approve] [Edit Plan] [Reject]
-```
-
-### FlowPilot executes approved actions
-
-After approval, FlowPilot can:
-
-* Create GitHub issues (MVP)
-* Post stakeholder summaries
-* Maintain an execution audit log
-
-Jira ticket creation is post-MVP (Roadmap v2). Notion project brief generation (Stretch Goal 1) and Google Drive read-only context retrieval (Stretch Goal 2) are attempted only after the MVP loop works — see Roadmap.
-
----
-
-## Key Features
-
-### 1. RTS-Grounded Planning
-
-FlowPilot uses Slack Real-Time Search to retrieve fresh, permission-aware workspace context before planning.
-
-This keeps plans grounded in real project conversations instead of generic LLM assumptions.
-
----
-
-### 2. Human-in-the-Loop Approval
-
-FlowPilot separates planning from execution.
-
-Read-only operations can run automatically, but write actions require user approval.
-
-Examples of gated actions:
-
-* Creating GitHub issues (MVP)
-* Creating Jira tickets (post-MVP, Roadmap v2)
-* Posting stakeholder announcements
-* Changing project status
-
-Notion updates (Stretch Goal 1) and Google Drive access (Stretch Goal 2) are not part of MVP.
-
----
-
-### 3. Typed Tool Execution
-
-FlowPilot's planner-orchestrator calls typed Python tool adapters directly — one lean orchestrator, not a multi-agent or MCP-server architecture (see Agent Design below).
-
-MVP integration:
-
-* GitHub (required)
-
-Post-MVP:
-
-* Jira (Roadmap v2, once GitHub issue creation works)
-* MCP (a possible future path for exposing tools to other systems — not used today)
-
-Stretch goals (attempted only after the MVP loop works):
-
-* Notion — project brief generation (Stretch Goal 1)
-* Google Drive — read-only context retrieval (Stretch Goal 2; write access requires a superseding decision)
-
----
-
-### 4. Risk Detection
-
-FlowPilot identifies execution risks such as:
-
-* Missing owners
-* Unclear requirements
-* Delayed milestones
-* Blocked dependencies
-* Unanswered stakeholder questions
-* Scope creep
-
----
-
-### 5. Stakeholder Summary
-
-FlowPilot posts a concise summary after execution (MVP):
-
-* Progress and created tasks
-* Open risks
-* Next steps
-
-Example:
-
-```text
-Project Summary
-
-Progress: 72%
-Open Risks: 3
-Blocked Tasks: 1
-Expected Completion: On Track
-
-Top Risk:
-Design approval is still pending and may affect engineering start date.
-```
-
-Recurring daily/weekly/executive reporting and health-assessment dashboards are Roadmap (v2), not MVP.
-
----
-
-### 6. Audit Log and Idempotent Actions
-
-Every proposed and approved action is logged.
-
-FlowPilot tracks:
-
-* Proposed action
-* Evidence used
-* Approval decision
-* External system target
-* Idempotency key
-* Execution result
-* Timestamp
-
-This makes agent actions reviewable, traceable, and safer for enterprise workflows.
+- **No external write before approval.** Reject creates nothing. Approve records an
+  `ApprovalDecision` before any write, and execution refuses to run unless the proposal is approved.
+- **Idempotent writes.** Every (task, target system) pair gets a deterministic idempotency key
+  stored in the database. Retries and double clicks don't create duplicate issues, tickets or pages.
+- **Partial failures are isolated.** One failed task doesn't stop the rest, and transient HTTP
+  failures (429, connection errors) are retried with bounded backoff.
+- **Slack messages are never stored or indexed.** Retrieved Slack and Drive context is used for the
+  current plan and then discarded. Only derived artifacts (plans, decisions, logs) are persisted.
+- **Untrusted text is fenced.** The Slack request and retrieved context go into the prompt as
+  delimited data blocks, never as instructions.
+- **Slack requests are signature-verified** by Bolt before any handler runs.
 
 ---
 
 ## Architecture
 
+There is one planner-orchestrator with typed tool adapters, not a multi-agent system. The workflows
+are a deterministic state machine written in plain async Python. LangGraph is listed as a dependency
+but isn't used by the app code.
+
 ```mermaid
 flowchart TD
-    A[Slack Assistant Surface] --> B[Bolt App / FastAPI Backend]
-
-    B --> C[FlowPilot Planner-Orchestrator]
-    C --> D[Slack Real-Time Search]
-    C --> F[Risk Evaluator]
-    C --> G[Action Proposal Engine]
-
-    G --> H[Slack Approval Card]
-    H --> I{Human Decision}
-
-    I -->|Approve| J[Action Executor]
-    I -->|Edit| C
-    I -->|Reject| K[Stop Execution]
-
-    J --> L[GitHub Issues]
-    J --> M[Jira - Post-MVP]
-
-    J --> P[Audit Log]
-    P --> Q[Post Status Update in Slack]
+    U["Slack: @mention or DM"] --> E["FastAPI /slack/events → Slack Bolt"]
+    E --> G{"Planning request?"}
+    G -->|no| S["Reply with example prompts"]
+    G -->|yes| C["Retrieve context: triggering message or Slack RTS, plus optional Google Drive"]
+    C --> P["Planner: Claude structured output → ProjectPlan (Pydantic)"]
+    P --> DB1[("Proposal saved: pending approval")]
+    DB1 --> CARD["Block Kit approval card"]
+    CARD --> A["FastAPI /slack/actions → Bolt action handlers"]
+    A -->|Reject| R["Rejected: no external writes"]
+    A -->|Edit Plan| C
+    A -->|Approve| D[("ApprovalDecision saved")]
+    D --> X["execute_plan: idempotent writes per task × system"]
+    X --> GH["GitHub issues"]
+    X --> JI["Jira tickets"]
+    X --> NO["Notion brief (optional)"]
+    X --> LOG[("ActionLog + ExternalArtifact")]
+    LOG --> SUM["Stakeholder summary posted in the thread"]
 ```
 
----
+Proposal lifecycle: `proposal_pending_approval → {approved | rejected | edit_requested}`, then
+`approved → executing → {executed | failed}`.
 
-## Agent Design
-
-FlowPilot uses a lean agent architecture focused on reliability.
-
-Instead of a broad multi-agent supervisor, the MVP uses one planner-orchestrator with typed tools.
-
-### Planner-Orchestrator Responsibilities
-
-* Understand the project request
-* Retrieve relevant Slack context
-* Generate a structured execution plan
-* Identify risks and dependencies
-* Propose external actions
-* Request human approval
-* Execute approved actions
-* Produce stakeholder updates
-
-### Tool Types
-
-| Tool Type       | Purpose                                                   |
-| --------------- | --------------------------------------------------------- |
-| Retrieval tools | Search Slack and connected project knowledge              |
-| Planning tools  | Convert goals into milestones and tasks                   |
-| Risk tools      | Detect blockers, missing owners, and timeline risks       |
-| Action tools    | Create GitHub issues (MVP); Jira post-MVP once GitHub works |
-| Reporting tools | Generate project summaries and stakeholder updates        |
-
----
-
-## Slack-Native Capabilities
-
-FlowPilot is designed around Slack-native agent primitives.
-
-| Capability              | Usage                                                |
-| ----------------------- | ---------------------------------------------------- |
-| Slack Assistant Surface | Main conversational interface                        |
-| Slack Events API        | Receives mentions, DMs, and assistant events         |
-| Bolt SDK                | Slack app framework                                  |
-| Real-Time Search API    | Retrieves permission-aware Slack context (Phase 7)   |
-| Block Kit               | Renders plans, approval cards, alerts, and summaries |
-| Progress Status Messages | Shows progress while FlowPilot works                |
-| Suggested Prompts       | Guides users toward high-value workflows             |
-
----
-
-## Technology Stack
-
-### Slack
-
-* Slack Events API
-* Slack Bolt SDK
-* Slack Assistant surface
-* Slack Real-Time Search API
-* Block Kit
-
-### AI Layer
-
-* Python agent runtime
-* Anthropic Claude Sonnet 5 (primary), OpenAI (fallback)
-* Structured tool calling
-* Retrieval-augmented planning
-* Human-in-the-loop execution
-
-### Backend
-
-* FastAPI
-* PostgreSQL / Supabase
-* SQLAlchemy + Alembic migrations
-* Pydantic validation
-* Background jobs for reporting (post-MVP)
-
-### Integrations
-
-* GitHub (MVP, direct API adapter)
-* Jira (post-MVP, Roadmap v2)
-* Notion — project brief generation (Stretch Goal 1)
-* Google Drive — read-only context retrieval (Stretch Goal 2)
-* MCP (optional post-MVP path — not used today)
-
-### Infrastructure
-
-* Docker
-* GitHub Actions
-* Cloud deployment
-* Environment-based configuration
-* Observability and audit logging
-
----
-
-## Security and Data Model
-
-FlowPilot is designed with enterprise safety in mind.
-
-### Slack Context
-
-* Slack context is retrieved through Slack Real-Time Search.
-* FlowPilot does not build a custom vector database of Slack messages.
-* Slack data is used only for the active user request.
-* Access follows Slack workspace permissions.
-
-### External Data
-
-FlowPilot may store metadata for its own workflow state:
-
-* Project plans
-* Approved action payloads
-* Audit log entries
-* Integration IDs
-* Execution results
-* User approval decisions
-
-### Write Safety
-
-FlowPilot uses a plan-approve-apply model:
-
-1. Generate proposal
-2. Render approval card
-3. Wait for human confirmation
-4. Execute approved action
-5. Verify result
-6. Log the outcome
-
----
-
-## Example Project Plan Output
+### Repository layout
 
 ```text
-Project: Customer Onboarding Redesign
-Timeline: 4 weeks
-Status: Planning
-
-Milestone 1: Requirements Alignment
-- Confirm onboarding goals
-- Review customer feedback
-- Identify success metrics
-
-Milestone 2: Design Finalization
-- Create updated onboarding flow
-- Review with product and design
-- Approve final UX copy
-
-Milestone 3: Engineering Implementation
-- Create frontend tasks
-- Create backend/API tasks
-- Add analytics events
-
-Milestone 4: QA and Launch
-- Run QA checklist
-- Prepare launch notes
-- Post stakeholder update
-
-Open Risks:
-- Design approval is not assigned
-- Analytics requirements are unclear
-- Launch timeline may be tight if QA slips
-```
-
----
-
-## Planned Repository Structure
-
-```text
-flowpilot-ai/
-├── app/
-│   ├── main.py
-│   ├── config.py
-│   └── server.py
-│
-├── slack/
-│   ├── assistant.py
-│   ├── events.py
-│   ├── blocks.py
-│   └── actions.py
-│
-├── agents/
-│   ├── planner.py
-│   ├── prompts.py
-│   └── schemas.py
-│
-├── workflows/
-│   ├── create_plan.py
-│   ├── approve_plan.py
-│   └── execute_plan.py
-│
-├── tools/
-│   ├── slack_rts.py
-│   ├── github.py
-│   ├── jira.py
-│   └── mcp.py
-│
-├── db/
-│   ├── models.py
-│   ├── repository.py
-│   └── session.py
-│
-├── tests/
-│   ├── test_planner.py
-│   ├── test_workflows.py
-│   └── test_github_tool.py
-│
-├── pyproject.toml
-├── uv.lock
+backend/
+├── app/          FastAPI app (main.py: /health + Slack routes), Pydantic settings, structlog setup
+├── slack/        Bolt app, event handlers + intent gate, button/select handlers, Block Kit renderers
+├── agents/       ProjectPlan schemas, planner (single Claude call), prompt construction
+├── workflows/    create_plan, approve_plan (decision + authorization), execute_plan (idempotent writes)
+├── tools/        external adapters: slack_rts, google_drive (read-only), github, jira, notion, retry
+├── db/           SQLAlchemy models, repositories, async session, Alembic migrations
+├── tests/        pytest suite (no live network: external calls are injected or faked)
 ├── Dockerfile
-├── docker-compose.yml
-├── .env.example
-└── README.md
+└── pyproject.toml / uv.lock
+docs/
+├── runbook.md               live demo runbook (not yet run)
+├── development.md           local development and validation guide
+└── slack-app-manifest.yaml  Slack app manifest
+docker-compose.yml           local Postgres + backend
 ```
+
+**Stack:** Python 3.12, uv, FastAPI, Uvicorn, Slack Bolt, Anthropic SDK, Pydantic, SQLAlchemy
+(async) + Alembic over PostgreSQL (asyncpg), HTTPX, google-auth, structlog, pytest, ruff, mypy.
 
 ---
 
-## Environment Variables
+## Setup and run
+
+You need Python 3.12, [`uv`](https://docs.astral.sh/uv/) (don't use pip, Poetry or Conda),
+Postgres (Docker or Supabase), [ngrok](https://ngrok.com/) or another HTTPS tunnel, a Slack
+workspace where you can install apps, an Anthropic API key, and a GitHub token with issue write
+access to a **throwaway** repo. FlowPilot creates real issues.
+
+### 1. Install dependencies
 
 ```bash
-# App
-APP_ENV=development
-APP_BASE_URL=http://localhost:8000
-LOG_LEVEL=INFO
-
-# Slack
-SLACK_BOT_TOKEN=
-SLACK_SIGNING_SECRET=
-SLACK_APP_TOKEN=
-
-# LLM
-OPENAI_API_KEY=
-ANTHROPIC_API_KEY=
-DEFAULT_MODEL_PROVIDER=anthropic
-DEFAULT_MODEL_NAME=claude-sonnet-5
-
-# Database
-DATABASE_URL=
-SUPABASE_URL=
-SUPABASE_SERVICE_ROLE_KEY=
-
-# GitHub
-GITHUB_TOKEN=
-GITHUB_OWNER=
-GITHUB_REPO=
-
-# Jira (Post-MVP)
-JIRA_BASE_URL=
-JIRA_EMAIL=
-JIRA_API_TOKEN=
-JIRA_PROJECT_KEY=
-
-# MCP (Post-MVP)
-MCP_SERVER_URL=
+cd backend
+uv sync
 ```
+
+### 2. Configure environment variables
+
+Copy the template `backend/.env.example` to `backend/.env` (gitignored) and fill it in, or export
+the variables in your shell. Settings load from `.env` in the current directory, so run commands
+from `backend/`. Variable names are the `Settings` fields in `backend/app/config.py`, upper-cased.
+Never commit or log real values.
+
+Required (the app won't start without them):
+
+- `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`
+- `ANTHROPIC_API_KEY`
+- `DATABASE_URL` (must use the `postgresql+asyncpg://` scheme)
+- `GITHUB_TOKEN`, `GITHUB_OWNER`, `GITHUB_REPO`
+
+Optional:
+
+| Variable(s) | Default | Purpose |
+|---|---|---|
+| `DEFAULT_MODEL_NAME` | `claude-sonnet-5` | Claude model used by the planner |
+| `DEFAULT_MODEL_PROVIDER` | `anthropic` | Read into settings, but only Anthropic is implemented |
+| `DEFAULT_TARGET_SYSTEM` | `github` | Card's initial target: `github`, `jira` or `both` |
+| `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PROJECT_KEY` | unset | Jira target |
+| `NOTION_API_KEY`, `NOTION_PARENT_PAGE_ID`, `DEFAULT_NOTION_ENABLED` | unset / `false` | Notion project brief |
+| `GOOGLE_DRIVE_CREDENTIALS`, `GOOGLE_DRIVE_FOLDER_SCOPE`, `DEFAULT_GOOGLE_DRIVE_ENABLED` | unset / `false` | Drive context. The credentials value is the service-account JSON **content**, not a file path |
+| `SLACK_RTS_ENABLED` | `false` | Live Slack Real-Time Search (also needs the RTS scopes that are commented out in the manifest) |
+| `FLOWPILOT_APPROVER_IDS` | empty | Comma-separated Slack user IDs that may decide on any plan (the requester always can) |
+| `LOG_LEVEL` | `INFO` | |
+
+### 3. Database and migrations
+
+```bash
+docker compose up -d db          # from the repo root; skip if you use Supabase or your own Postgres
+cd backend
+uv run alembic upgrade head
+```
+
+With the compose database, use the `DATABASE_URL` shown in the header comment of
+`docker-compose.yml`.
+
+### 4. Run the API
+
+```bash
+cd backend
+uv run uvicorn app.main:app --reload    # http://localhost:8000
+curl -s localhost:8000/health           # expect {"status":"ok","db":"ok"}
+```
+
+### 5. Expose it and create the Slack app
+
+```bash
+ngrok http 8000
+```
+
+1. At api.slack.com/apps choose **Create New App → From a manifest** and paste
+   [`docs/slack-app-manifest.yaml`](docs/slack-app-manifest.yaml).
+2. Copy the **Signing Secret** and, after installing the app, the **Bot User OAuth Token** into
+   your env vars, then restart the API.
+3. Set **Event Subscriptions** to `https://<ngrok-host>/slack/events` and **Interactivity** to
+   `https://<ngrok-host>/slack/actions`. The server has to be running so Slack can verify the URL.
+4. Invite the bot to a channel and post, for example:
+   `@FlowPilot launch our customer onboarding redesign in four weeks.`
+
+The full demo script, SQL audit checks and troubleshooting table are in
+[`docs/runbook.md`](docs/runbook.md).
 
 ---
 
-## Getting Started
+## Tests and quality checks
 
-### 1. Clone the repository
+Run everything from `backend/`. These are the checks a change has to pass:
 
 ```bash
-git clone https://github.com/your-org/flowpilot-ai.git
-cd flowpilot-ai
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy .
+uv run pytest -q
 ```
 
-### 2. Create environment file
+The suite needs no network, no Slack workspace and no Postgres. Tests use in-memory SQLite and
+injected fakes for every external call.
+
+Coverage: `pytest-cov` isn't a pinned dev dependency, so pull it in for a one-off run:
 
 ```bash
-cp .env.example .env
+uv run --with pytest-cov pytest --cov=. --cov-report=term-missing
 ```
 
-Fill in the required Slack, model, database, and integration credentials.
+More detail (what each test file covers, how to validate each integration by hand) is in
+[`docs/development.md`](docs/development.md).
 
-### 3. Start the backend
+---
+
+## Docker
 
 ```bash
+# Postgres + backend (the image runs `alembic upgrade head` before starting uvicorn)
 docker compose up --build
+
+# or build and run the backend image on its own
+docker build -f backend/Dockerfile -t flowpilot-ai-backend backend
+docker run -p 8000:8000 --env-file backend/.env flowpilot-ai-backend
 ```
 
-### 4. Install the Slack app
-
-Create and install a Slack app with the required bot scopes, event subscriptions, and assistant permissions.
-
-### 5. Run the agent
-
-Mention FlowPilot in Slack:
-
-```text
-@FlowPilot create an execution plan for our onboarding redesign launch.
-```
+The image is built with uv, runs as a non-root user, and needs no secrets at build time. All
+configuration comes in as env vars at run time. Compose is for local development only: both ports
+bind to `127.0.0.1`, and it isn't a production deployment.
 
 ---
 
-## MVP Scope
+## Documentation
 
-The MVP focuses on one high-value workflow:
-
-> Turn a Slack project discussion into an approved execution plan and create the corresponding GitHub issues.
-
-### Included in MVP
-
-* Slack Assistant interaction
-* RTS-grounded project context retrieval
-* Structured execution planning
-* Risk detection
-* Block Kit approval cards
-* GitHub issue creation
-* Stakeholder status summary
-* Audit logging
-
-### Not Included in MVP
-
-* Autonomous task ownership
-* Long-term Slack message indexing
-* Fully autonomous external writes
-* Multi-project portfolio optimization
-* Enterprise admin dashboard
-* Predictive resource planning
-
----
-
-## Roadmap
-
-### v1 — Challenge MVP
-
-* Slack-native project planning
-* RTS-grounded context retrieval
-* Human approval cards
-* GitHub issue creation
-* Stakeholder summary
-* Action audit log
-
-### Stretch Goals (attempted only after the v1 loop works)
-
-* Notion project brief generation (Stretch Goal 1)
-* Google Drive read-only context retrieval (Stretch Goal 2; write access requires a superseding decision)
-
-### v2 — Team Execution Layer
-
-* Jira ticket creation
-* Multi-project tracking
-* Recurring risk scans
-* Notion and Drive synchronization
-* Project memory summaries
-* Team-level reporting
-
-### v3 — Autonomous Execution Intelligence
-
-* Predictive delivery risk
-* Resource planning recommendations
-* Cross-project dependency detection
-* Self-healing workflows
-* Organization-wide execution memory
-
----
-
-## Evaluation Metrics
-
-FlowPilot can be evaluated using:
-
-| Metric                  | Description                                           |
-| ----------------------- | ----------------------------------------------------- |
-| Plan acceptance rate    | Percentage of generated plans approved by users       |
-| Action approval rate    | Percentage of proposed actions approved               |
-| Edit rate               | How often users modify generated plans                |
-| Time saved              | Estimated reduction in manual planning/reporting time |
-| Risk detection accuracy | Quality of identified blockers and dependencies       |
-| Task creation success   | Percentage of approved tasks created successfully     |
-| User feedback           | Slack feedback button responses                       |
-
----
-
-## Why This Matters
-
-Most workplace AI tools answer questions.
-
-FlowPilot helps teams execute.
-
-It combines:
-
-* Slack-native context
-* Structured planning
-* Safe tool execution
-* Human approval
-* Risk tracking
-* Stakeholder communication
-
-The result is a practical execution agent that makes Slack not just a place where work is discussed, but a place where work is coordinated and moved forward.
-
----
-
-## Team
-
-### AI Architecture Lead
-
-Owns agent design, planning workflows, retrieval strategy, risk reasoning, and tool orchestration.
-
-### Product & Platform Lead
-
-Owns Slack experience, backend services, integrations, deployment, and production infrastructure.
-
----
-
-## Built For
-
-**Slack Agent Builder Challenge 2026**
-
-FlowPilot AI leverages:
-
-* Slack AI app surfaces
-* Slack Real-Time Search
-* Typed tool execution (GitHub-first)
-* Block Kit interaction patterns
-
-to build a safer, more execution-focused workplace agent.
-
----
+- [`docs/runbook.md`](docs/runbook.md): live Slack demo, step by step (not yet run)
+- [`docs/development.md`](docs/development.md): local development, checks, per-integration validation
+- [`docs/slack-app-manifest.yaml`](docs/slack-app-manifest.yaml): Slack app configuration
 
 ## License
 
-MIT License. 
-OWNERS: 
-- AJITKUMAR SENTHIL KUMAR
-- SRUTHISRI VENKATESWARAN
+MIT. See [`LICENSE`](LICENSE). Owners: Ajitkumar Senthil Kumar and Sruthisri Venkateswaran.
