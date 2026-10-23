@@ -12,7 +12,11 @@ from agents.schemas import ProjectPlan
 from db.models import ActionLogStatus
 from db.session import async_session_factory
 from slack.app import bolt_app
-from slack.blocks import render_already_decided_notice, render_stakeholder_summary
+from slack.blocks import (
+    refresh_proposed_actions,
+    render_already_decided_notice,
+    render_stakeholder_summary,
+)
 from workflows.approve_plan import (
     DecisionLockedError,
     approve_plan,
@@ -44,8 +48,8 @@ async def _notify_already_decided(respond: Any, exc: DecisionLockedError, attemp
 async def handle_select_target_system(ack: Any, body: dict, action: dict, respond: Any) -> None:
     """FR-101: swaps the target-system choice on the approval card in place (`chat.update`) --
     no DB write, no ApprovalDecision (research.md Decision 1). The Approve button's value is
-    the only place the choice is carried, so it's the only element besides the select itself
-    that needs rewriting. Preserves the Approve value's third (notion_flag) segment untouched
+    the only place the choice is carried; the proposed-actions text is then re-derived from it.
+    Preserves the Approve value's third (notion_flag) segment untouched
     (research.md Decision 1, 003-flowpilot-notion-integration)."""
     await ack()
     target_system = action["selected_option"]["value"]
@@ -61,6 +65,7 @@ async def handle_select_target_system(ack: Any, body: dict, action: dict, respon
                 proposal_id, _old_target_system, notion_flag = element["value"].split("|", 2)
                 element["value"] = f"{proposal_id}|{target_system}|{notion_flag}"
 
+    refresh_proposed_actions(blocks)
     await respond(blocks=blocks, replace_original=True)
 
 
@@ -85,6 +90,7 @@ async def handle_select_notion_brief(ack: Any, body: dict, action: dict, respond
                 proposal_id, target_system, _old_notion_flag = element["value"].split("|", 2)
                 element["value"] = f"{proposal_id}|{target_system}|{notion_flag}"
 
+    refresh_proposed_actions(blocks)
     await respond(blocks=blocks, replace_original=True)
 
 

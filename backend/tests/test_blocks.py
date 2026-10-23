@@ -3,11 +3,22 @@
 RED until T023 creates backend/slack/blocks.py.
 
 Interface imposed on T023:
-- ``render_approval_card(*, proposal_id: str, plan: ProjectPlan, action_summary: str) -> list[dict]``
+- ``render_approval_card(*, proposal_id: str, plan: ProjectPlan, ...) -> list[dict]``
   returning a Block Kit blocks list. Each button carries a stable ``action_id`` and a
-  ``value`` containing the ``proposal_id``.
+  ``value`` containing the ``proposal_id``. The proposed-actions text is derived from the
+  plan's task count and the selected target system / Notion toggle (FR-009), not passed in.
 """
 import json
+
+import pytest
+
+
+def _proposed_actions_text(blocks):
+    return next(
+        b["text"]["text"]
+        for b in blocks
+        if b.get("block_id", "").startswith("proposed_actions|")
+    )
 
 
 def test_approval_card_identical_regardless_of_drive_tagged_evidence_summary(valid_plan_dict):
@@ -27,10 +38,10 @@ def test_approval_card_identical_regardless_of_drive_tagged_evidence_summary(val
     ]
 
     blocks_slack_only = render_approval_card(
-        proposal_id="prop-123", plan=ProjectPlan(**slack_only), action_summary="Create 1 GitHub issue"
+        proposal_id="prop-123", plan=ProjectPlan(**slack_only)
     )
     blocks_drive_grounded = render_approval_card(
-        proposal_id="prop-123", plan=ProjectPlan(**drive_grounded), action_summary="Create 1 GitHub issue"
+        proposal_id="prop-123", plan=ProjectPlan(**drive_grounded)
     )
 
     assert blocks_slack_only == blocks_drive_grounded
@@ -41,9 +52,7 @@ def test_approval_card_has_required_fields_and_action_ids(valid_plan_dict):
     from slack.blocks import render_approval_card
 
     plan = ProjectPlan(**valid_plan_dict)
-    blocks = render_approval_card(
-        proposal_id="prop-123", plan=plan, action_summary="Create 1 GitHub issue"
-    )
+    blocks = render_approval_card(proposal_id="prop-123", plan=plan)
     assert isinstance(blocks, list)
     text = json.dumps(blocks)
 
@@ -79,7 +88,7 @@ def test_approval_card_includes_target_system_selector_and_encodes_approve_value
 
     plan = ProjectPlan(**valid_plan_dict)
     blocks = render_approval_card(
-        proposal_id="prop-123", plan=plan, action_summary="Create 1 Jira ticket", target_system="jira"
+        proposal_id="prop-123", plan=plan, target_system="jira"
     )
 
     elements = [el for b in blocks if b.get("type") == "actions" for el in b.get("elements", [])]
@@ -109,7 +118,7 @@ def test_approval_card_defaults_target_system_selector_to_github(valid_plan_dict
     from slack.blocks import render_approval_card
 
     plan = ProjectPlan(**valid_plan_dict)
-    blocks = render_approval_card(proposal_id="prop-1", plan=plan, action_summary="Create 1 GitHub issue")
+    blocks = render_approval_card(proposal_id="prop-1", plan=plan)
 
     elements = [el for b in blocks if b.get("type") == "actions" for el in b.get("elements", [])]
     select = next(el for el in elements if el.get("action_id") == "select_target_system")
@@ -135,7 +144,7 @@ def test_approval_card_includes_checked_notion_checkbox_and_encodes_flag_in_appr
 
     plan = ProjectPlan(**valid_plan_dict)
     blocks = render_approval_card(
-        proposal_id="prop-123", plan=plan, action_summary="Create 1 GitHub issue", notion_enabled=True
+        proposal_id="prop-123", plan=plan, notion_enabled=True
     )
     elements = [el for b in blocks if b.get("type") == "actions" for el in b.get("elements", [])]
 
@@ -160,7 +169,7 @@ def test_approval_card_omits_initial_options_when_notion_checkbox_unchecked(monk
 
     plan = ProjectPlan(**valid_plan_dict)
     blocks = render_approval_card(
-        proposal_id="prop-123", plan=plan, action_summary="Create 1 GitHub issue", notion_enabled=False
+        proposal_id="prop-123", plan=plan, notion_enabled=False
     )
     elements = [el for b in blocks if b.get("type") == "actions" for el in b.get("elements", [])]
 
@@ -187,7 +196,7 @@ def test_approval_card_omits_notion_checkbox_entirely_when_unconfigured(monkeypa
     monkeypatch.setattr(settings, "notion_api_key", None)
 
     plan = ProjectPlan(**valid_plan_dict)
-    blocks = render_approval_card(proposal_id="prop-123", plan=plan, action_summary="Create 1 GitHub issue")
+    blocks = render_approval_card(proposal_id="prop-123", plan=plan)
     elements = [el for b in blocks if b.get("type") == "actions" for el in b.get("elements", [])]
 
     assert not any(el.get("action_id") == "select_notion_brief" for el in elements)
@@ -216,7 +225,7 @@ def test_approval_card_never_encodes_notion_true_when_unconfigured_even_if_enabl
 
     plan = ProjectPlan(**valid_plan_dict)
     blocks = render_approval_card(
-        proposal_id="prop-123", plan=plan, action_summary="Create 1 GitHub issue", notion_enabled=True
+        proposal_id="prop-123", plan=plan, notion_enabled=True
     )
     elements = [el for b in blocks if b.get("type") == "actions" for el in b.get("elements", [])]
 
@@ -224,6 +233,121 @@ def test_approval_card_never_encodes_notion_true_when_unconfigured_even_if_enabl
 
     approve = next(el for el in elements if el.get("action_id") == "approve_plan")
     assert approve["value"] == "prop-123|github|false"
+
+
+@pytest.mark.parametrize(
+    ("target_system", "expected"),
+    [
+        ("github", "*Proposed actions:* Create 2 GitHub issues"),
+        ("jira", "*Proposed actions:* Create 2 Jira tickets"),
+        ("both", "*Proposed actions:* Create 2 GitHub issues + 2 Jira tickets"),
+    ],
+)
+def test_approval_card_proposed_actions_name_the_selected_target_system(
+    valid_plan_dict, target_system, expected
+):
+    """FR-009 — the proposed external actions reflect the selected target system(s) instead of
+    always saying "GitHub issue(s)"."""
+    from agents.schemas import ProjectPlan
+    from slack.blocks import render_approval_card
+
+    task = valid_plan_dict["tasks"][0]
+    valid_plan_dict["tasks"] = [task, {**task, "title": "Write copy"}]
+    blocks = render_approval_card(
+        proposal_id="prop-123",
+        plan=ProjectPlan(**valid_plan_dict),
+        target_system=target_system,
+    )
+
+    assert _proposed_actions_text(blocks) == expected
+
+
+def test_approval_card_proposed_actions_list_notion_brief_only_when_configured(
+    monkeypatch, valid_plan_dict
+):
+    """FR-009 + AC-203 — the Notion brief is listed when toggled on, and never when the
+    notion_api_key guard forces notion_enabled off."""
+    from agents.schemas import ProjectPlan
+    from app.config import settings
+    from slack.blocks import render_approval_card
+
+    plan = ProjectPlan(**valid_plan_dict)
+
+    monkeypatch.setattr(settings, "notion_api_key", "secret-token")
+    blocks = render_approval_card(
+        proposal_id="prop-123", plan=plan, notion_enabled=True
+    )
+    assert _proposed_actions_text(blocks) == (
+        "*Proposed actions:* Create 1 GitHub issue + 1 Notion project brief"
+    )
+
+    monkeypatch.setattr(settings, "notion_api_key", None)
+    blocks = render_approval_card(
+        proposal_id="prop-123", plan=plan, notion_enabled=True
+    )
+    assert "Notion" not in _proposed_actions_text(blocks)
+
+
+async def _run_card_action(handler, blocks, action):
+    responded: dict = {}
+
+    async def ack():
+        pass
+
+    async def respond(**kwargs):
+        responded.update(kwargs)
+
+    await handler(
+        ack=ack, body={"message": {"blocks": blocks}}, action=action, respond=respond
+    )
+    return responded["blocks"]
+
+
+@pytest.mark.asyncio
+async def test_select_target_system_rewrites_proposed_actions_text(valid_plan_dict):
+    """FR-009 regression — switching the target in place must update the proposed-actions text
+    along with the Approve value; it used to keep saying "GitHub issue(s)"."""
+    from agents.schemas import ProjectPlan
+    from slack.actions import handle_select_target_system
+    from slack.blocks import render_approval_card
+
+    blocks = render_approval_card(
+        proposal_id="prop-123", plan=ProjectPlan(**valid_plan_dict)
+    )
+    blocks = await _run_card_action(
+        handle_select_target_system, blocks, {"selected_option": {"value": "jira"}}
+    )
+
+    assert _proposed_actions_text(blocks) == "*Proposed actions:* Create 1 Jira ticket"
+
+
+@pytest.mark.asyncio
+async def test_select_notion_brief_rewrites_proposed_actions_text(
+    monkeypatch, valid_plan_dict
+):
+    """FR-009 regression — ticking the Notion brief in place adds it to the proposed actions while
+    keeping the already-selected target system(s)."""
+    from agents.schemas import ProjectPlan
+    from app.config import settings
+    from slack.actions import handle_select_notion_brief
+    from slack.blocks import render_approval_card
+
+    monkeypatch.setattr(settings, "notion_api_key", "secret-token")
+    blocks = render_approval_card(
+        proposal_id="prop-123",
+        plan=ProjectPlan(**valid_plan_dict),
+        target_system="both",
+        notion_enabled=False,
+    )
+    blocks = await _run_card_action(
+        handle_select_notion_brief,
+        blocks,
+        {"selected_options": [{"value": "notion_brief"}]},
+    )
+
+    assert _proposed_actions_text(blocks) == (
+        "*Proposed actions:* Create 1 GitHub issue + 1 Jira ticket + 1 Notion project brief"
+    )
 
 
 def test_stakeholder_summary_includes_links_risks_and_partial_breakdown():

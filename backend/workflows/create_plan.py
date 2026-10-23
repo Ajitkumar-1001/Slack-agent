@@ -101,9 +101,5 @@ async def create_plan(*, event: dict, say: Say) -> None:
         drive_retrieval_mode=drive_retrieval_mode,
     )
 
-    card = render_approval_card(
-        proposal_id=str(proposal.id),
-        plan=plan,
-        action_summary=f"Create {len(plan.tasks)} GitHub issue(s)",
-    )
+    card = render_approval_card(proposal_id=str(proposal.id), plan=plan)
     await say(blocks=card)
