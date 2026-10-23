@@ -1,9 +1,11 @@
 """Static checks that docs/slack-app-manifest.yaml, docs/runbook.md and README.md stay in step with
 the code: the manifest subscribes only to events slack/events.py handles and points at the routes
 FastAPI actually serves, the runbook's demo prompt clears the FR-002 intent gate, and the README
-documents every setting and links the public docs only."""
+documents every setting and links the public docs only. Also pins pytest's --cov targets to the
+backend's actual packages."""
 
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -84,3 +86,15 @@ def test_public_docs_do_not_reference_local_only_files(doc):
     text = (REPO / doc).read_text()
     for local_only in (".specify", "Slack-agent", "CLAUDE.md"):
         assert local_only not in text
+
+
+def test_coverage_targets_every_backend_package():
+    backend = REPO / "backend"
+    pyproject = tomllib.loads((backend / "pyproject.toml").read_text())
+    addopts = pyproject["tool"]["pytest"]["ini_options"]["addopts"]
+    covered = set(re.findall(r"--cov=(\w+)", addopts))
+    # a new top-level package would otherwise silently drop out of the report
+    packages = {p.parent.name for p in backend.glob("*/*.py")} - {"tests"}
+    assert covered == packages
+    for doc in ("README.md", "docs/development.md"):
+        assert "--with pytest-cov" not in (REPO / doc).read_text()

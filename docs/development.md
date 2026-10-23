@@ -58,11 +58,10 @@ uv run mypy .
 uv run pytest -q
 ```
 
-Coverage isn't a pinned dependency. For a one-off report:
-
-```bash
-uv run --with pytest-cov pytest --cov=. --cov-report=term-missing
-```
+Coverage runs automatically with `uv run pytest`. `pytest-cov` is a dev dependency, and the
+`[tool.pytest.ini_options]` `addopts` in `backend/pyproject.toml` reports per-file coverage
+with missing lines for `app`, `slack`, `agents`, `workflows`, `tools` and `db`. There's no
+`--cov-fail-under`, so low coverage never fails the run. Pass `--no-cov` to skip it.
 
 `pre-commit` is in the dev dependencies, but no hook config is committed yet, and there's no CI
 workflow either. The gate above is run by hand for now.

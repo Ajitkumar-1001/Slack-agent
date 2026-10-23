@@ -34,8 +34,12 @@ dev = [
     "pyright>=1.1.410",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
     "ruff>=0.15.19",
 ]
+
+[tool.pytest.ini_options]
+addopts = "--cov=app --cov=slack --cov=agents --cov=workflows --cov=tools --cov=db --cov-report=term-missing"
 
 [tool.mypy]
 python_version = "3.12"

@@ -206,11 +206,9 @@ uv run pytest -q
 The suite needs no network, no Slack workspace and no Postgres. Tests use in-memory SQLite and
 injected fakes for every external call.
 
-Coverage: `pytest-cov` isn't a pinned dev dependency, so pull it in for a one-off run:
-
-```bash
-uv run --with pytest-cov pytest --cov=. --cov-report=term-missing
-```
+Coverage runs automatically: `uv run pytest` prints a per-file report with missing lines for
+`app`, `slack`, `agents`, `workflows`, `tools` and `db` (configured in `backend/pyproject.toml`).
+There's no minimum threshold.
 
 More detail (what each test file covers, how to validate each integration by hand) is in
 [`docs/development.md`](docs/development.md).
