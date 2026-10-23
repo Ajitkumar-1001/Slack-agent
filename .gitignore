@@ -28,3 +28,10 @@ backend/main.py
 # macOS
 .DS_Store
 **/.DS_Store
+
+# Local-only folders (kept on disk, never published)
+Slack-agent/
+.claude/
+.cursor/
+.specify/
+graphify-out/
