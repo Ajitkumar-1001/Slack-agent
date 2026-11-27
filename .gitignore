@@ -36,3 +36,12 @@ Slack-agent/
 .cursor/
 .specify/
 graphify-out/
+
+# Private planning and agent material (never published)
+docs/
+specs/
+vault/
+.codex/
+.agents/
+*.md
+!README.md

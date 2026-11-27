@@ -16,8 +16,7 @@ system until a person clicks **Approve**.
 
 > **Status:** the code paths below are implemented and covered by automated tests, but the
 > **live end-to-end demo in a real Slack workspace has not been run yet**. Every external API in
-> the test suite is faked. The step-by-step script for that first live run is
-> [`docs/runbook.md`](docs/runbook.md).
+> the test suite is faked. The step-by-step script for that first live run is kept outside this repository.
 
 ---
 
@@ -99,10 +98,6 @@ backend/
 ├── tests/        pytest suite (no live network: external calls are injected or faked)
 ├── Dockerfile
 └── pyproject.toml / uv.lock
-docs/
-├── runbook.md               live demo runbook (not yet run)
-├── development.md           local development and validation guide
-└── slack-app-manifest.yaml  Slack app manifest
 docker-compose.yml           local Postgres + backend
 ```
 
@@ -179,16 +174,13 @@ ngrok http 8000
 ```
 
 1. At api.slack.com/apps choose **Create New App → From a manifest** and paste
-   [`docs/slack-app-manifest.yaml`](docs/slack-app-manifest.yaml).
+   the FlowPilot app manifest (kept outside this repository; ask the maintainer).
 2. Copy the **Signing Secret** and, after installing the app, the **Bot User OAuth Token** into
    your env vars, then restart the API.
 3. Set **Event Subscriptions** to `https://<ngrok-host>/slack/events` and **Interactivity** to
    `https://<ngrok-host>/slack/actions`. The server has to be running so Slack can verify the URL.
 4. Invite the bot to a channel and post, for example:
    `@FlowPilot launch our customer onboarding redesign in four weeks.`
-
-The full demo script, SQL audit checks and troubleshooting table are in
-[`docs/runbook.md`](docs/runbook.md).
 
 ---
 
@@ -210,9 +202,6 @@ Coverage runs automatically: `uv run pytest` prints a per-file report with missi
 `app`, `slack`, `agents`, `workflows`, `tools` and `db` (configured in `backend/pyproject.toml`).
 There's no minimum threshold.
 
-More detail (what each test file covers, how to validate each integration by hand) is in
-[`docs/development.md`](docs/development.md).
-
 ---
 
 ## Docker
@@ -231,12 +220,6 @@ configuration comes in as env vars at run time. Compose is for local development
 bind to `127.0.0.1`, and it isn't a production deployment.
 
 ---
-
-## Documentation
-
-- [`docs/runbook.md`](docs/runbook.md): live Slack demo, step by step (not yet run)
-- [`docs/development.md`](docs/development.md): local development, checks, per-integration validation
-- [`docs/slack-app-manifest.yaml`](docs/slack-app-manifest.yaml): Slack app configuration
 
 ## License
 
